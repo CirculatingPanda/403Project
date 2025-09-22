@@ -1,0 +1,13 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Chat (Python)",
+      "type": "python",
+      "request": "launch",
+      "program": "${workspaceFolder}/chat.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
+    }
+  ]
+}
