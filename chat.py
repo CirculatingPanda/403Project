@@ -1,4 +1,5 @@
 import os, sys, json, copy, re
+from difflib import SequenceMatcher
 from typing import List, Dict
 from datetime import datetime
 from rich.console import Console
@@ -29,20 +30,16 @@ console = Console()
 session = PromptSession(history=InMemoryHistory())
 
 SYSTEM_MSG = (
-    "You are a requirements-gathering assistant for memory controllers.\n"
+    "You help a hardware engineer complete a JSON specification for on-chip memory controllers.\n"
+    "Always follow any [GUIDANCE] block in the latest user turn.\n"
     "Rules:\n"
-    "• ONLY ask for fields from ask_order for the chosen kind.\n"
-    "• DO NOT invent new fields.\n"
-    "• When proposing a default, NEVER say 'press Enter'. Instead say:\n"
-    "  'Type a value or type the word default'.\n"
-    "Flow:\n"
-    "1) If kind is not set, ask user to choose ONE from the list.\n"
-    "2) Once kind is set, ask ONLY for the next missing field.\n"
-    "   Offer ONE sensible default.\n"
-    "3) When user answers, reply briefly, and ALSO output on a new line:\n"
-    '   UPDATE_JSON={\"path\":\"<field.path>\",\"value\":<json_value>}\n'
-    "   Path MUST be dot notation (e.g. host_if.bus). Do NOT use slashes.\n"
-    "4) When all fields are filled, present the final compact JSON spec."
+    "• Ask only for fields that appear in ask_order for the active kind.\n"
+    "• If the kind is missing, request the user pick exactly one from the provided list.\n"
+    "• When asking for a field, use the format: '<Field description>. Type a value or type 'default' to use <default value>.' If no default exists, say 'Type a value.' Do not list multiple options unless told to.\n"
+    "• After the user answers, acknowledge with a sentence like 'Set <field> to <value>.' before emitting on a new line:\n"
+    '  UPDATE_JSON={\"path\":\"<field.path>\",\"value\":<json_value>}\n'
+    "  Use dot notation for the path (e.g. host_if.bus). Never invent fields or paths.\n"
+    "• When every required field is filled, present the compact final JSON specification and note where it was saved."
 )
 
 # --- Registry load ---
@@ -87,6 +84,19 @@ def next_missing_field(kind: str, spec: dict) -> str | None:
             return p
     return None
 
+
+def next_missing_after(kind: str, spec: dict, current_path: str | None) -> str | None:
+    found=False
+    for p in ask_order(kind):
+        if p == current_path:
+            found=True; continue
+        if not found:
+            continue
+        v=get_by_path(spec, p)
+        if v in (None, "", []):
+            return p
+    return None
+
 def normalize_path(path: str | None) -> str | None:
     if path is None: return None
     p = path.strip()
@@ -99,14 +109,115 @@ def valid_path_for_kind(kind: str, path: str) -> bool:
     if path == "kind": return True
     return path in ask_order(kind)
 
+
+def describe_field(path: str) -> str:
+    return path.replace("_", " ").replace(".", " ")
+
+
+def _iter_spec_leaves(obj, prefix=""):
+    if isinstance(obj, dict):
+        for key, val in obj.items():
+            new_prefix = f"{prefix}.{key}" if prefix else key
+            yield from _iter_spec_leaves(val, new_prefix)
+    else:
+        yield prefix, obj
+
+
+def validate_spec(kind: str, spec: dict) -> List[tuple[str, str]]:
+    errors: List[tuple[str, str]] = []
+    for path, value in _iter_spec_leaves(spec):
+        if isinstance(value, str) and value.strip().lower() == "default":
+            errors.append((path, "Replace 'default' with an explicit value."))
+    return errors
+
+
+QUESTION_WORDS = {
+    "who", "what", "when", "where", "why", "how", "are", "is", "did",
+    "does", "do", "can", "should", "could", "would", "will"
+}
+
+
+def is_meta_question(text: str) -> bool:
+    stripped = text.strip().lower()
+    if not stripped:
+        return False
+    if "?" in stripped:
+        return True
+    first_token = stripped.split()[0]
+    return first_token in QUESTION_WORDS
+
+_WORD_SYNONYM_SEQUENCES = {
+    "dualport": [["dual", "port"], ["dual", "ports"]],
+    "regfile": [["register", "file"], ["reg", "file"]],
+    "ddr2": [["ddr", "2"]],
+}
+
+
+def _tokens_from_text(text: str) -> List[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _sequence_in_tokens(seq: List[str], tokens: List[str]) -> bool:
+    if not seq: return True
+    t_len = len(tokens)
+    for i in range(t_len - len(seq) + 1):
+        if tokens[i:i + len(seq)] == seq:
+            return True
+    return False
+
+
+def _word_in_tokens(word: str, tokens: List[str], token_set: set[str], joined: str) -> bool:
+    if word in token_set:
+        return True
+    for seq in _WORD_SYNONYM_SEQUENCES.get(word, []):
+        if _sequence_in_tokens(seq, tokens):
+            return True
+    if word in joined:
+        return True
+    for tok in tokens:
+        if abs(len(tok) - len(word)) > 2:
+            continue
+        if SequenceMatcher(None, word, tok).ratio() >= 0.75:
+            return True
+    return False
+
+
+def infer_kind_from_text(text: str) -> str | None:
+    tokens = _tokens_from_text(text)
+    if not tokens:
+        return None
+    token_set = set(tokens)
+    joined = "".join(tokens)
+    best_kind = None
+    best_score = 0
+
+    for kind in REGISTRY["kinds"].keys():
+        words = [w for w in kind.lower().split("_") if w]
+        score = 0
+        for word in words:
+            if word == "controller":
+                if _word_in_tokens(word, tokens, token_set, joined):
+                    score += 1
+                continue
+            if _word_in_tokens(word, tokens, token_set, joined):
+                score += 3
+            elif word.rstrip("s") in token_set:
+                score += 2
+        if score > best_score:
+            best_score = score
+            best_kind = kind
+
+    return best_kind if best_score >= 4 else None
+
+
 def sanitize_filename(s: str) -> str:
     return re.sub(r'[^A-Za-z0-9_.-]+', '_', s)
 
 def export_spec_auto(kind: str, spec: dict) -> str:
-    os.makedirs("specs", exist_ok=True)
     ts = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    fname = f"{sanitize_filename(kind)}_{ts}.json"
-    fpath = os.path.join("specs", fname)
+    name = sanitize_filename(spec.get("name") or kind)
+    fname = f"{name}_{ts}.json"
+    fpath = os.path.join(os.getcwd(), fname)
     with open(fpath, "w", encoding="utf-8") as f:
         json.dump(spec, f, indent=2)
     return fpath
@@ -138,12 +249,22 @@ def main():
     messages=[{"role":"system","content":SYSTEM_MSG}]
     console.print(Panel.fit(f"Console Chat • Model: [bold]{MODEL}[/bold] • Ctrl+C to exit",border_style="cyan"))
     current_kind=None; working_spec=None; exported_once=False
-    available_kinds=", ".join(REGISTRY["kinds"].keys())
+    last_export_path=None
+    pending_ack_field=None
+    queued_field_after_ack=None
+    ignore_update_for_field=None
+    auto_user_message=None
+    available_kind_list=list(REGISTRY["kinds"].keys())
+    available_kinds=", ".join(available_kind_list)
 
     while True:
-        try: user=session.prompt("\nYou> ").strip()
-        except (EOFError,KeyboardInterrupt):
-            console.print("\nBye!"); break
+        if auto_user_message is not None:
+            user=auto_user_message
+            auto_user_message=None
+        else:
+            try: user=session.prompt("\nYou> ").strip()
+            except (EOFError,KeyboardInterrupt):
+                console.print("\nBye!"); break
         if not user: continue
 
         low=user.lower()
@@ -151,6 +272,11 @@ def main():
         if low=="/reset":
             messages=[{"role":"system","content":SYSTEM_MSG}]
             current_kind=None; working_spec=None; exported_once=False
+            last_export_path=None
+            pending_ack_field=None
+            queued_field_after_ack=None
+            ignore_update_for_field=None
+            auto_user_message=None
             console.print("[green]Session reset.[/green]"); continue
         if low=="/spec":
             from rich import print_json
@@ -158,27 +284,112 @@ def main():
 
         # Auto-kind detection if user mentions a kind name
         if current_kind is None:
-            for k in REGISTRY["kinds"].keys():
-                if k in low.replace(" ","_"):
-                    current_kind=k; working_spec=new_spec(k); exported_once=False
-                    console.print(f"[green]Kind set to {k}[/green]")
+            num_match=re.fullmatch(r"\d+", user)
+            if num_match:
+                idx=int(num_match.group())-1
+                if 0 <= idx < len(available_kind_list):
+                    chosen=available_kind_list[idx]
+                    current_kind=chosen; working_spec=new_spec(chosen); exported_once=False
+                    last_export_path=None
+                    pending_ack_field=None
+                    queued_field_after_ack=None
+                    ignore_update_for_field=None
+                    auto_user_message=None
+                    console.print(f"[green]Kind set to {chosen}[/green]")
+            if current_kind is None:
+                detected = infer_kind_from_text(low)
+                if detected:
+                    current_kind = detected
+                    working_spec = new_spec(detected)
+                    exported_once = False
+                    last_export_path=None
+                    pending_ack_field=None
+                    queued_field_after_ack=None
+                    ignore_update_for_field=None
+                    auto_user_message=None
+                    console.print(f"[green]Kind set to {detected}[/green]")
 
         # Guidance for LLM
         if current_kind is None:
             guidance=f"Kind not chosen. Available: {available_kinds}"
         else:
             missing=next_missing_field(current_kind,working_spec)
-            if missing:
-                dflt=default_for(current_kind,missing)
+            meta_question=False
+            if auto_user_message is None and pending_ack_field and is_meta_question(user):
+                meta_question=True
+                ignore_update_for_field=pending_ack_field
+            if meta_question and pending_ack_field:
+                field=pending_ack_field
+                dflt=default_for(current_kind,field)
+                if dflt is None:
+                    reask_line=(
+                        f"After answering, ask again with: 'Please provide {describe_field(field)}. Type a value.'"
+                    )
+                else:
+                    reask_line=(
+                        f"After answering, ask again with: 'Please specify {describe_field(field)}. Type a value or type \"default\" to use {json.dumps(dflt)}.'"
+                    )
                 guidance=(
                     f"Current kind: {current_kind}\n"
-                    f"Here is the next field we need to complete: {missing}\n"
-                    f"Suggested default: {json.dumps(dflt)}\n"
-                    "Tell user to type a value or 'default'.\n"
-                    f"Output UPDATE_JSON with path='{missing}' only."
+                    f"The user asked a side question. Respond briefly to the question without changing any field values.\n"
+                    "Do not emit UPDATE_JSON for this turn.\n"
+                    f"{reask_line}"
                 )
+            elif pending_ack_field and missing == pending_ack_field:
+                ack_field = pending_ack_field
+                next_field = next_missing_after(current_kind,working_spec,ack_field)
+                queued_field_after_ack = next_field
+                if next_field:
+                    next_default = default_for(current_kind,next_field)
+                    if next_default is None:
+                        follow_line=(
+                            f"Then ask with: 'Please provide {describe_field(next_field)}. Type a value.'"
+                        )
+                    else:
+                        follow_line=(
+                            f"Then ask with: 'Please specify {describe_field(next_field)}. Type a value or type \"default\" to use {json.dumps(next_default)}.'"
+                        )
+                else:
+                    follow_line="Then note that the specification is complete and wait for the final summary; do not output the JSON here."
+                guidance=(
+                    f"Current kind: {current_kind}\n"
+                    f"Confirm field: {ack_field} ({describe_field(ack_field)})\n"
+                    "The user just answered this field.\n"
+                    "Say exactly 'Set <field> to <value>.' (present tense, no 'already') before anything else.\n"
+                    "Immediately output UPDATE_JSON with that value on the next line.\n"
+                    f"{follow_line}"
+                )
+            elif missing:
+                dflt=default_for(current_kind,missing)
+                if dflt is None:
+                    default_line=(
+                        f"Ask with one sentence of the form: 'Please provide {describe_field(missing)}. Type a value.'"
+                    )
+                else:
+                    default_line=(
+                        f"Ask with one sentence of the form: 'Please specify {describe_field(missing)}. Type a value or type \"default\" to use {json.dumps(dflt)}.'"
+                    )
+                guidance=(
+                    f"Current kind: {current_kind}\n"
+                    f"Ask for field: {missing}\n"
+                    f"{default_line}\n"
+                    "Do not list multiple options.\n"
+                    f"After the user responds, acknowledge with 'Set {missing} to <value>.' then output UPDATE_JSON with path='{missing}'."
+                )
+                pending_ack_field = missing
+                queued_field_after_ack = None
+                ignore_update_for_field=None
             else:
-                guidance=f"All fields filled for {current_kind}. Show final spec."
+                if not exported_once and working_spec is not None:
+                    last_export_path=export_spec_auto(current_kind,working_spec)
+                    exported_once=True
+                    console.print(f"[green]Spec complete and saved to[/green] {last_export_path}")
+                location_line=f"Saved file: {last_export_path}" if last_export_path else "Saved file path is unknown."
+                guidance=(
+                    f"All fields filled for {current_kind}.\n"
+                    f"Show the compact final JSON specification.\n"
+                    f"Also mention: {location_line}"
+                )
 
         messages.append({"role":"user","content":f"{user}\n\n[GUIDANCE]\n{guidance}"})
         messages=trim_history(messages)
@@ -195,9 +406,45 @@ def main():
                     raw_path=upd.get("path"); path=normalize_path(raw_path); value=upd.get("value")
                     if path=="kind" and value in REGISTRY["kinds"]:
                         current_kind=value; working_spec=new_spec(value); exported_once=False
+                        last_export_path=None
+                        pending_ack_field=None
+                        queued_field_after_ack=None
+                        ignore_update_for_field=None
+                        auto_user_message=None
                     elif current_kind and working_spec is not None and path:
+                        if ignore_update_for_field and path == ignore_update_for_field:
+                            console.print(f"[dim]Ignored update for {path} while addressing a side question.[/dim]")
+                            continue
                         if valid_path_for_kind(current_kind,path):
                             set_by_path(working_spec,path,value)
+                            if pending_ack_field == path:
+                                pending_ack_field = queued_field_after_ack
+                                queued_field_after_ack = None
+                            validation_errors: List[tuple[str, str]] = []
+                            if current_kind:
+                                missing_after_update = next_missing_field(current_kind,working_spec)
+                                if missing_after_update is None:
+                                    validation_errors = validate_spec(current_kind,working_spec)
+                                    if validation_errors:
+                                        first_path, reason = validation_errors[0]
+                                        console.print(f"[yellow]Invalid value for {first_path}: {reason}[/yellow]")
+                                        if valid_path_for_kind(current_kind, first_path):
+                                            set_by_path(working_spec, first_path, None)
+                                        pending_ack_field = None
+                                        queued_field_after_ack = None
+                                        exported_once = False
+                                        last_export_path = None
+                                        if auto_user_message is None:
+                                            auto_user_message=(
+                                                f"The value provided for {describe_field(first_path)} was invalid. {reason} Please ask for {describe_field(first_path)} again using the standard format."
+                                            )
+                                    else:
+                                        if not exported_once:
+                                            last_export_path=export_spec_auto(current_kind,working_spec)
+                                            exported_once=True
+                                            console.print(f"[green]Spec complete and saved to[/green] {last_export_path}")
+                                        if auto_user_message is None:
+                                            auto_user_message="[auto_finalize]"
                             # progress
                             total=len(ask_order(current_kind)); filled=sum(1 for p in ask_order(current_kind) if get_by_path(working_spec,p) not in (None,"",[]))
                             console.print(f"[cyan]Progress: {filled}/{total} fields filled[/cyan]")
@@ -205,10 +452,7 @@ def main():
                             console.print(f"[dim]Ignored unknown field: {raw_path} (normalized: {path})[/dim]")
                 except Exception: pass
 
-        # Auto-export when complete
-        if current_kind and working_spec and next_missing_field(current_kind,working_spec) is None and not exported_once:
-            path=export_spec_auto(current_kind,working_spec); exported_once=True
-            console.print(f"[green]Spec complete and saved to[/green] {path}")
+        ignore_update_for_field=None
 
 if __name__=="__main__":
     main()
