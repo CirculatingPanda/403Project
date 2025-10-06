@@ -1,0 +1,420 @@
+{
+  "kinds": {
+    "sram_controller": {
+      "skeleton": {
+        "kind": "sram_controller",
+        "name": "",
+        "description": "",
+        "clock_mhz": null,
+        "reset": { "active_low": true, "sync": true },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "mem": { "depth": null, "data_bits": null },
+        "timing": { "read_latency_cycles": null },
+        "write_enable_mask": false,
+        "chip_selects": 1,
+        "ecc": { "enabled": false, "scheme": null }
+      },
+      "ask_order": [
+        "host_if.bus",
+        "host_if.data_bits",
+        "host_if.addr_bits",
+        "mem.data_bits",
+        "mem.depth",
+        "timing.read_latency_cycles",
+        "write_enable_mask",
+        "ecc.enabled",
+        "ecc.scheme",
+        "clock_mhz"
+      ],
+      "defaults": {
+        "host_if.bus": "AXI4-Lite",
+        "host_if.data_bits": 32,
+        "host_if.addr_bits": 16,
+        "mem.data_bits": 32,
+        "mem.depth": 4096,
+        "timing.read_latency_cycles": 1,
+        "write_enable_mask": true,
+        "ecc.enabled": false,
+        "clock_mhz": 200
+      }
+    },
+
+    "dualport_sram_controller": {
+      "skeleton": {
+        "kind": "dualport_sram_controller",
+        "name": "",
+        "description": "",
+        "clock_mhz": null,
+        "reset": { "active_low": true, "sync": true },
+        "host_if": {
+          "portA": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+          "portB": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" }
+        },
+        "mem": { "depth": null, "data_bits": null },
+        "timing": { "read_latency_cycles": null },
+        "conflicts": { "same_address": "" },
+        "ecc": { "enabled": false, "scheme": null }
+      },
+      "ask_order": [
+        "host_if.portA.bus",
+        "host_if.portA.data_bits",
+        "host_if.portA.addr_bits",
+        "host_if.portB.bus",
+        "host_if.portB.data_bits",
+        "host_if.portB.addr_bits",
+        "mem.data_bits",
+        "mem.depth",
+        "timing.read_latency_cycles",
+        "conflicts.same_address",
+        "ecc.enabled",
+        "ecc.scheme",
+        "clock_mhz"
+      ],
+      "defaults": {
+        "host_if.portA.bus": "AXI4-Lite",
+        "host_if.portB.bus": "AXI4-Lite",
+        "host_if.portA.data_bits": 32,
+        "host_if.portB.data_bits": 32,
+        "host_if.portA.addr_bits": 16,
+        "host_if.portB.addr_bits": 16,
+        "mem.data_bits": 32,
+        "mem.depth": 8192,
+        "timing.read_latency_cycles": 1,
+        "conflicts.same_address": "stall_B",
+        "ecc.enabled": false,
+        "clock_mhz": 200
+      }
+    },
+
+    "fifo_controller": {
+      "skeleton": {
+        "kind": "fifo_controller",
+        "name": "",
+        "description": "",
+        "clock_mhz": null,
+        "reset": { "active_low": true, "sync": true },
+        "host_if": { "bus": "custom", "data_bits": null, "addr_bits": 0, "endian": "little" },
+        "fifo": {
+          "depth": null,
+          "data_bits": null,
+          "iface": "",
+          "almost_full_thresh": null,
+          "almost_empty_thresh": null
+        },
+        "behavior": { "on_overflow": "", "on_underflow": "" }
+      },
+      "ask_order": [
+        "fifo.data_bits",
+        "fifo.depth",
+        "fifo.iface",
+        "fifo.almost_full_thresh",
+        "fifo.almost_empty_thresh",
+        "behavior.on_overflow",
+        "behavior.on_underflow",
+        "clock_mhz"
+      ],
+      "defaults": {
+        "fifo.data_bits": 32,
+        "fifo.depth": 1024,
+        "fifo.iface": "ready_valid",
+        "fifo.almost_full_thresh": 896,
+        "fifo.almost_empty_thresh": 128,
+        "behavior.on_overflow": "stall_writer",
+        "behavior.on_underflow": "stall_reader",
+        "clock_mhz": 200
+      }
+    },
+
+    "rom_controller": {
+      "skeleton": {
+        "kind": "rom_controller",
+        "name": "",
+        "description": "",
+        "clock_mhz": null,
+        "reset": { "active_low": true, "sync": true },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "mem": { "depth": null, "data_bits": null },
+        "init": { "type": "", "source": "" },
+        "timing": { "read_latency_cycles": null }
+      },
+      "ask_order": [
+        "host_if.bus",
+        "host_if.data_bits",
+        "host_if.addr_bits",
+        "mem.data_bits",
+        "mem.depth",
+        "init.type",
+        "init.source",
+        "timing.read_latency_cycles",
+        "clock_mhz"
+      ],
+      "defaults": {
+        "host_if.bus": "AXI4-Lite",
+        "host_if.data_bits": 32,
+        "host_if.addr_bits": 15,
+        "mem.data_bits": 32,
+        "mem.depth": 16384,
+        "init.type": "hex_file",
+        "init.source": "firmware.hex",
+        "timing.read_latency_cycles": 1,
+        "clock_mhz": 200
+      }
+    },
+
+    "regfile_controller": {
+      "skeleton": {
+        "kind": "regfile_controller",
+        "name": "",
+        "description": "",
+        "clock_mhz": null,
+        "reset": { "active_low": true, "sync": true },
+        "host_if": { "bus": "custom", "data_bits": null, "addr_bits": 0, "endian": "little" },
+        "regfile": {
+          "entries": null,
+          "data_bits": null,
+          "read_ports": null,
+          "write_ports": null,
+          "bypass_on_same_cycle": null,
+          "hazard_policy": ""
+        }
+      },
+      "ask_order": [
+        "regfile.entries",
+        "regfile.data_bits",
+        "regfile.read_ports",
+        "regfile.write_ports",
+        "regfile.bypass_on_same_cycle",
+        "regfile.hazard_policy",
+        "clock_mhz"
+      ],
+      "defaults": {
+        "regfile.entries": 32,
+        "regfile.data_bits": 32,
+        "regfile.read_ports": 2,
+        "regfile.write_ports": 1,
+        "regfile.bypass_on_same_cycle": true,
+        "regfile.hazard_policy": "bypass",
+        "clock_mhz": 300
+      }
+    },
+
+    "sdram_controller": {
+      "skeleton": {
+        "kind": "sdram_controller",
+        "name": "",
+        "description": "",
+        "clock_mhz": null,
+        "reset": { "active_low": true, "sync": true },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "dram": {
+          "tech": "SDR",
+          "row_bits": null,
+          "col_bits": null,
+          "bank_bits": 2,
+          "burst_len": null,
+          "row_policy": "open_page"
+        },
+        "timing": {
+          "tRCD": null,
+          "tCL": null,
+          "tRP": null,
+          "tRAS": null
+        },
+        "refresh": { "period_ns": null, "per_rows": 8192 },
+        "scheduler": { "policy": "FCFS" },
+        "ecc": { "enabled": false, "scheme": null }
+      },
+      "ask_order": [
+        "host_if.bus",
+        "host_if.data_bits",
+        "host_if.addr_bits",
+        "dram.row_bits",
+        "dram.col_bits",
+        "dram.burst_len",
+        "dram.row_policy",
+        "timing.tRCD",
+        "timing.tCL",
+        "timing.tRP",
+        "timing.tRAS",
+        "refresh.period_ns",
+        "scheduler.policy",
+        "ecc.enabled",
+        "ecc.scheme",
+        "clock_mhz"
+      ],
+      "defaults": {
+        "host_if.bus": "AXI4",
+        "host_if.data_bits": 64,
+        "host_if.addr_bits": 24,
+        "dram.row_bits": 12,
+        "dram.col_bits": 10,
+        "dram.burst_len": 4,
+        "dram.row_policy": "open_page",
+        "timing.tRCD": 3,
+        "timing.tCL": 3,
+        "timing.tRP": 3,
+        "timing.tRAS": 7,
+        "refresh.period_ns": 7800,
+        "scheduler.policy": "FCFS",
+        "ecc.enabled": false,
+        "clock_mhz": 100
+      }
+    },
+
+    "ddr_controller": {
+      "skeleton": {
+        "kind": "ddr_controller",
+        "name": "",
+        "description": "",
+        "clock_mhz": null,
+        "reset": { "active_low": true, "sync": true },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "dram": {
+          "tech": "DDR",
+          "row_bits": null,
+          "col_bits": null,
+          "bank_bits": 4,
+          "burst_len": null,
+          "row_policy": "open_page",
+          "dqs": true
+        },
+        "timing": {
+          "tRCD": null,
+          "tCL": null,
+          "tRP": null,
+          "tRAS": null,
+          "tWR": null,
+          "tWTR": null,
+          "tRTP": null
+        },
+        "refresh": { "period_ns": null, "per_rows": 8192 },
+        "scheduler": { "policy": "FR-FCFS" },
+        "phy": { "read_dqs_gate": true },
+        "ecc": { "enabled": false, "scheme": null }
+      },
+      "ask_order": [
+        "host_if.bus",
+        "host_if.data_bits",
+        "host_if.addr_bits",
+        "dram.row_bits",
+        "dram.col_bits",
+        "dram.burst_len",
+        "dram.row_policy",
+        "timing.tRCD",
+        "timing.tCL",
+        "timing.tRP",
+        "timing.tRAS",
+        "timing.tWR",
+        "timing.tWTR",
+        "timing.tRTP",
+        "refresh.period_ns",
+        "scheduler.policy",
+        "ecc.enabled",
+        "ecc.scheme",
+        "clock_mhz"
+      ],
+      "defaults": {
+        "host_if.bus": "AXI4",
+        "host_if.data_bits": 64,
+        "host_if.addr_bits": 26,
+        "dram.row_bits": 13,
+        "dram.col_bits": 10,
+        "dram.burst_len": 4,
+        "dram.row_policy": "open_page",
+        "timing.tRCD": 3,
+        "timing.tCL": 3,
+        "timing.tRP": 3,
+        "timing.tRAS": 7,
+        "timing.tWR": 3,
+        "timing.tWTR": 2,
+        "timing.tRTP": 2,
+        "refresh.period_ns": 7800,
+        "scheduler.policy": "FR-FCFS",
+        "ecc.enabled": false,
+        "clock_mhz": 133
+      }
+    },
+
+    "ddr2_controller": {
+      "skeleton": {
+        "kind": "ddr2_controller",
+        "name": "",
+        "description": "",
+        "clock_mhz": null,
+        "reset": { "active_low": true, "sync": true },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "dram": {
+          "tech": "DDR2",
+          "row_bits": null,
+          "col_bits": null,
+          "bank_bits": 4,
+          "burst_len": null,
+          "row_policy": "open_page",
+          "dqs": true,
+          "odt": true,
+          "dll_enable": true
+        },
+        "timing": {
+          "tRCD": null,
+          "tCL": null,
+          "tRP": null,
+          "tRAS": null,
+          "tRC": null,
+          "tWR": null,
+          "tWTR": null,
+          "tRTP": null,
+          "tFAW": null
+        },
+        "refresh": { "period_ns": null, "per_rows": 8192 },
+        "scheduler": { "policy": "FR-FCFS" },
+        "phy": { "read_dqs_gate": true, "write_leveling": false },
+        "ecc": { "enabled": false, "scheme": null }
+      },
+      "ask_order": [
+        "host_if.bus",
+        "host_if.data_bits",
+        "host_if.addr_bits",
+        "dram.row_bits",
+        "dram.col_bits",
+        "dram.burst_len",
+        "dram.row_policy",
+        "timing.tRCD",
+        "timing.tCL",
+        "timing.tRP",
+        "timing.tRAS",
+        "timing.tRC",
+        "timing.tWR",
+        "timing.tWTR",
+        "timing.tRTP",
+        "timing.tFAW",
+        "refresh.period_ns",
+        "scheduler.policy",
+        "ecc.enabled",
+        "ecc.scheme",
+        "clock_mhz"
+      ],
+      "defaults": {
+        "host_if.bus": "AXI4",
+        "host_if.data_bits": 64,
+        "host_if.addr_bits": 27,
+        "dram.row_bits": 13,
+        "dram.col_bits": 10,
+        "dram.burst_len": 4,
+        "dram.row_policy": "open_page",
+        "timing.tRCD": 4,
+        "timing.tCL": 4,
+        "timing.tRP": 4,
+        "timing.tRAS": 10,
+        "timing.tRC": 14,
+        "timing.tWR": 4,
+        "timing.tWTR": 2,
+        "timing.tRTP": 2,
+        "timing.tFAW": 10,
+        "refresh.period_ns": 7800,
+        "scheduler.policy": "FR-FCFS",
+        "ecc.enabled": false,
+        "clock_mhz": 200
+      }
+    }
+  }
+}
