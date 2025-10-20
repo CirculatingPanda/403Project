@@ -1,0 +1,48 @@
+{
+  "kind": "ddr_controller",
+  "name": "",
+  "description": "",
+  "clock_mhz": 133,
+  "reset": {
+    "active_low": true,
+    "sync": true
+  },
+  "host_if": {
+    "bus": "AXI4",
+    "data_bits": 64,
+    "addr_bits": 26,
+    "endian": "little"
+  },
+  "dram": {
+    "tech": "DDR",
+    "row_bits": 13,
+    "col_bits": 10,
+    "bank_bits": 4,
+    "burst_len": 4,
+    "row_policy": "open_page",
+    "dqs": true
+  },
+  "timing": {
+    "tRCD": 3,
+    "tCL": 3,
+    "tRP": 3,
+    "tRAS": 7,
+    "tWR": 3,
+    "tWTR": 2,
+    "tRTP": 2
+  },
+  "refresh": {
+    "period_ns": 7800,
+    "per_rows": 8192
+  },
+  "scheduler": {
+    "policy": "FR-FCFS"
+  },
+  "phy": {
+    "read_dqs_gate": true
+  },
+  "ecc": {
+    "enabled": false,
+    "scheme": "SEC"
+  }
+}
