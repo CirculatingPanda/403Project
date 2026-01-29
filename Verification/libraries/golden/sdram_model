@@ -1,0 +1,286 @@
+// golden/sdram_model.sv
+// Simplified SDR SDRAM behavioral model (open-page).
+// - Bank/row state machine with ACT, READ, WRITE, PRE, REF, MRS
+// - Enforces key timings (tRCD, tRP, tRAS, tRC, tRFC, tWR, CL, BL) in *cycles*
+// - READ: drives dq_in for BL beats after CL latency
+// - WRITE: samples dq_out for BL beats; applies DQM masks per byte
+// - No true refresh leakage; REF just occupies tRFC.
+//
+// Notes:
+// * Keep TB responsible for ns->cycles. Provide timing as integer cycles to this model.
+// * This is a teaching/bring-up model, not JEDEC-complete.
+
+`timescale 1ns/1ps
+module sdram_model #(
+  parameter int DATA_W   = 16,
+  parameter int ROW_W    = 12,
+  parameter int COL_W    = 8,
+  parameter int BANK_W   = 2,
+  parameter int DQM_W    = (DATA_W/8>0)?(DATA_W/8):1,
+  parameter int BL       = 4,
+  parameter int CL       = 2,  // CAS latency in cycles
+
+  // Timing (cycles) — fill from TB/spec
+  parameter int T_RCD_CYC = 3,   // ACT -> RD/WR
+  parameter int T_RP_CYC  = 3,   // PRE -> ACT
+  parameter int T_RAS_CYC = 5,   // ACT -> PRE min
+  parameter int T_RC_CYC  = 8,   // ACT -> ACT same bank
+  parameter int T_RFC_CYC = 8,   // REFRESH duration
+  parameter int T_WR_CYC  = 2    // WRITE recovery before PRE
+) (
+  input  logic                   clk,
+  input  logic                   rstn,
+
+  // Command/address pins
+  input  logic                   cke,
+  input  logic                   cs_n,
+  input  logic                   ras_n,
+  input  logic                   cas_n,
+  input  logic                   we_n,
+  input  logic [BANK_W-1:0]      ba,
+  input  logic [ROW_W-1:0]       a_row,
+  input  logic [COL_W-1:0]       a_col,
+  input  logic [DQM_W-1:0]       dqm,
+
+  // Data interface (controller <-> device)
+  input  logic [DATA_W-1:0]      dq_out,  // from controller (WRITE)
+  output logic [DATA_W-1:0]      dq_in,   // to controller (READ)
+  input  logic                   dq_oe    // controller drives dq_out when 1
+);
+
+  localparam int BE_W = DQM_W;
+
+  // ----------------------------
+  // Memory array (simple 3D -> flat)
+  // ----------------------------
+  typedef struct packed {
+    logic [BANK_W-1:0]  bank;
+    logic [ROW_W-1:0]   row;
+    logic [COL_W-1:0]   col;
+  } addr_t;
+
+  function automatic int unsigned idx(input addr_t a);
+    // Flat index: (((bank * ROWS) + row) * COLS) + col
+    return (((a.bank * (1<<ROW_W)) + a.row) * (1<<COL_W)) + a.col;
+  endfunction
+
+  // Store whole DATA_W per column (burst wraps across columns)
+  localparam int MEM_DEPTH = (1<<BANK_W) * (1<<ROW_W) * (1<<COL_W);
+  logic [DATA_W-1:0] mem [0:MEM_DEPTH-1];
+
+  // ----------------------------
+  // Per-bank state
+  // ----------------------------
+  typedef enum logic [1:0] {BK_IDLE, BK_ACTIVE} bk_state_e;
+  typedef struct {
+    bk_state_e          st;
+    logic [ROW_W-1:0]   open_row;
+    int                 t_rcd;   // cooldown counters
+    int                 t_ras;
+    int                 t_rp;
+    int                 t_wr;
+  } bank_t;
+
+  bank_t bank[0:(1<<BANK_W)-1];
+
+  // Global timers
+  int t_rfc;  // refresh busy
+
+  // ----------------------------
+  // Command decode helpers
+  // ----------------------------
+  typedef enum logic [2:0] {
+    CMD_NOP,
+    CMD_ACT,
+    CMD_PRE,
+    CMD_REF,
+    CMD_MRS,
+    CMD_READ,
+    CMD_WRITE
+  } cmd_e;
+
+  function automatic cmd_e decode_cmd(
+    input logic cs_n_i, ras_n_i, cas_n_i, we_n_i
+  );
+    if (cs_n_i)           return CMD_NOP;
+    if (!ras_n_i && cas_n_i && we_n_i)  return CMD_ACT;
+    if (!ras_n_i && cas_n_i && !we_n_i) return CMD_PRE;
+    if (!ras_n_i && !cas_n_i && we_n_i) return CMD_REF;
+    if (!ras_n_i && !cas_n_i && !we_n_i)return CMD_MRS;
+    if (ras_n_i && !cas_n_i && we_n_i)  return CMD_READ;
+    if (ras_n_i && !cas_n_i && !we_n_i) return CMD_WRITE;
+    return CMD_NOP;
+  endfunction
+
+  // ----------------------------
+  // READ pipeline (per-bank simple queue)
+  // ----------------------------
+  typedef struct packed {
+    logic                valid;
+    int                  delay;   // cycles until first beat (CL)
+    logic [BANK_W-1:0]   b;
+    logic [ROW_W-1:0]    r;
+    logic [COL_W-1:0]    c;
+    int                  beats_left;
+  } rd_pend_t;
+
+  rd_pend_t rdq;
+
+  // Drive dq_in only when serving a read beat.
+  always_ff @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+      dq_in <= '0;
+    end else begin
+      if (rdq.valid) begin
+        if (rdq.delay > 0) begin
+          rdq.delay <= rdq.delay - 1;
+        end else if (rdq.beats_left > 0) begin
+          addr_t a; a.bank = rdq.b; a.row = rdq.r; a.col = rdq.c;
+          dq_in <= mem[idx(a)];
+          // Next column (wrap on burst)
+          rdq.c <= rdq.c + 1'b1;
+          rdq.beats_left <= rdq.beats_left - 1;
+          if (rdq.beats_left == 1) rdq.valid <= 1'b0;
+        end
+      end
+      // If no active read, hold last dq_in (device would tri-state on real bus,
+      // but keeping driven simplifies TB data capture).
+    end
+  end
+
+  // ----------------------------
+  // Main behavior
+  // ----------------------------
+  int cycle;
+  always_ff @(posedge clk or negedge rstn) begin
+    if (!rstn) begin
+      cycle <= 0;
+      t_rfc <= 0;
+      for (int b=0; b<(1<<BANK_W); b++) begin
+        bank[b].st      <= BK_IDLE;
+        bank[b].open_row<= '0;
+        bank[b].t_rcd   <= 0;
+        bank[b].t_ras   <= 0;
+        bank[b].t_rp    <= 0;
+        bank[b].t_wr    <= 0;
+      end
+      rdq <= '{valid:0, delay:0, b:'0, r:'0, c:'0, beats_left:0};
+    end else if (cke) begin
+      cycle <= cycle + 1;
+
+      // Decrement timers
+      if (t_rfc > 0) t_rfc <= t_rfc - 1;
+      for (int b=0; b<(1<<BANK_W); b++) begin
+        if (bank[b].t_rcd > 0) bank[b].t_rcd <= bank[b].t_rcd - 1;
+        if (bank[b].t_ras > 0) bank[b].t_ras <= bank[b].t_ras - 1;
+        if (bank[b].t_rp  > 0) bank[b].t_rp  <= bank[b].t_rp  - 1;
+        if (bank[b].t_wr  > 0) bank[b].t_wr  <= bank[b].t_wr  - 1;
+      end
+
+      // Decode command on this cycle
+      cmd_e cmd = decode_cmd(cs_n, ras_n, cas_n, we_n);
+
+      unique case (cmd)
+        CMD_NOP: /* nothing */ ;
+
+        CMD_MRS: begin
+          // Mode register set — not modeled in detail; could latch BL/CL if driven here.
+          // Treat as NOP functionally.
+        end
+
+        CMD_REF: begin
+          // Block activity for tRFC cycles.
+          t_rfc <= T_RFC_CYC;
+        end
+
+        CMD_ACT: begin
+          if (t_rfc > 0) begin
+            $warning("[sdram_model] ACT during REF busy");
+          end else begin
+            int b = ba;
+            if (bank[b].st == BK_ACTIVE) begin
+              // Need PRE before new ACT (tRC). We approximate with t_ras gate.
+              $warning("[sdram_model] ACT while bank already ACTIVE (missing PRE?)");
+            end
+            if (bank[b].t_rp > 0) begin
+              $warning("[sdram_model] Violated tRP on ACT (bank=%0d)", b);
+            end
+            bank[b].st       <= BK_ACTIVE;
+            bank[b].open_row <= a_row;
+            bank[b].t_rcd    <= T_RCD_CYC;
+            bank[b].t_ras    <= T_RAS_CYC;
+            bank[b].t_wr     <= 0;
+          end
+        end
+
+        CMD_PRE: begin
+          // PRECHARGE: if A10==1 (often), treat as PRECHARGE ALL; here we precharge selected bank only.
+          int b = ba;
+          if (bank[b].st != BK_ACTIVE) begin
+            // benign
+          end else if (bank[b].t_ras > 0) begin
+            $warning("[sdram_model] Violated tRAS min on PRE (bank=%0d)", b);
+          end else if (bank[b].t_wr > 0) begin
+            $warning("[sdram_model] Violated tWR on PRE (bank=%0d)", b);
+          end
+          bank[b].st    <= BK_IDLE;
+          bank[b].t_rp  <= T_RP_CYC;
+          // Closing the row; no more reads scheduled here (model keeps any already-scheduled read going).
+        end
+
+        CMD_READ: begin
+          int b = ba;
+          if (bank[b].st != BK_ACTIVE || bank[b].open_row != a_row) begin
+            $warning("[sdram_model] READ without open row/bank match (bank=%0d)", b);
+          end else if (bank[b].t_rcd > 0) begin
+            $warning("[sdram_model] Violated tRCD on READ (bank=%0d)", b);
+          end
+          // Schedule read burst after CL cycles
+          rdq.valid       <= 1'b1;
+          rdq.delay       <= CL;
+          rdq.b           <= ba;
+          rdq.r           <= a_row;
+          rdq.c           <= a_col;
+          rdq.beats_left  <= BL;
+        end
+
+        CMD_WRITE: begin
+          int b = ba;
+          if (bank[b].st != BK_ACTIVE || bank[b].open_row != a_row) begin
+            $warning("[sdram_model] WRITE without open row/bank match (bank=%0d)", b);
+          end else if (bank[b].t_rcd > 0) begin
+            $warning("[sdram_model] Violated tRCD on WRITE (bank=%0d)", b);
+          end
+          // Capture BL beats starting *this* cycle while controller asserts dq_oe.
+          // We mask bytes using DQM (1=mask/ignore).
+          for (int beat=0; beat<BL; beat++) begin
+            automatic int beat_idx = beat;
+            // Capture on subsequent cycles
+            fork
+              begin
+                @(posedge clk);
+                for (int i=0; i<beat_idx; i++) @(posedge clk);
+                if (dq_oe) begin
+                  addr_t a; a.bank = ba; a.row = a_row; a.col = a_col + beat_idx[COL_W-1:0];
+                  logic [DATA_W-1:0] cur = mem[idx(a)];
+                  logic [DATA_W-1:0] nxt = dq_out;
+                  // Apply DQM: 1=mask (keep cur byte)
+                  for (int by=0; by<BE_W; by++) begin
+                    if (dqm[by]) nxt[8*by +: 8] = cur[8*by +: 8];
+                  end
+                  mem[idx(a)] = nxt;
+                end else begin
+                  $warning("[sdram_model] dq_oe deasserted during WRITE burst beat=%0d", beat_idx);
+                end
+              end
+            join_none
+          end
+          bank[b].t_wr <= T_WR_CYC; // need write recovery before PRE
+        end
+
+        default: /* NOP */ ;
+      endcase
+    end
+  end
+
+endmodule

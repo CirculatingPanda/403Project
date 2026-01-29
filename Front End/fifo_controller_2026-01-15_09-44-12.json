@@ -1,0 +1,27 @@
+{
+  "kind": "fifo_controller",
+  "name": "",
+  "description": "",
+  "clock_mhz": 200,
+  "reset": {
+    "active_low": true,
+    "sync": true
+  },
+  "host_if": {
+    "bus": "custom",
+    "data_bits": null,
+    "addr_bits": null,
+    "endian": "little"
+  },
+  "fifo": {
+    "depth": 1024,
+    "data_bits": 32,
+    "iface": "ready_valid",
+    "almost_full_thresh": 896,
+    "almost_empty_thresh": 128
+  },
+  "behavior": {
+    "on_overflow": "stall_writer",
+    "on_underflow": "stall_reader"
+  }
+}

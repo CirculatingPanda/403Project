@@ -15,6 +15,9 @@
         "ecc": { "enabled": false, "scheme": null }
       },
       "ask_order": [
+        "reset.active_low",
+        "reset.sync",
+        "host_if.endian",
         "host_if.bus",
         "host_if.data_bits",
         "host_if.addr_bits",
@@ -27,6 +30,9 @@
         "clock_mhz"
       ],
       "defaults": {
+        "reset.active_low": true,
+        "reset.sync": true,
+        "host_if.endian": "little",
         "host_if.bus": "AXI4-Lite",
         "host_if.data_bits": 32,
         "host_if.addr_bits": 16,
@@ -35,6 +41,7 @@
         "timing.read_latency_cycles": 1,
         "write_enable_mask": true,
         "ecc.enabled": false,
+        "ecc.scheme": "parity",
         "clock_mhz": 200
       }
     },
@@ -56,9 +63,13 @@
         "ecc": { "enabled": false, "scheme": null }
       },
       "ask_order": [
+        "reset.active_low",
+        "reset.sync",
+        "host_if.portA.endian",
         "host_if.portA.bus",
         "host_if.portA.data_bits",
         "host_if.portA.addr_bits",
+        "host_if.portB.endian",
         "host_if.portB.bus",
         "host_if.portB.data_bits",
         "host_if.portB.addr_bits",
@@ -71,6 +82,10 @@
         "clock_mhz"
       ],
       "defaults": {
+        "reset.active_low": true,
+        "reset.sync": true,
+        "host_if.portA.endian": "little",
+        "host_if.portB.endian": "little",
         "host_if.portA.bus": "AXI4-Lite",
         "host_if.portB.bus": "AXI4-Lite",
         "host_if.portA.data_bits": 32,
@@ -82,6 +97,7 @@
         "timing.read_latency_cycles": 1,
         "conflicts.same_address": "stall_B",
         "ecc.enabled": false,
+        "ecc.scheme": "parity",
         "clock_mhz": 200
       }
     },
@@ -104,6 +120,9 @@
         "behavior": { "on_overflow": "", "on_underflow": "" }
       },
       "ask_order": [
+        "reset.active_low",
+        "reset.sync",
+        "host_if.endian",
         "fifo.data_bits",
         "fifo.depth",
         "fifo.iface",
@@ -114,6 +133,9 @@
         "clock_mhz"
       ],
       "defaults": {
+        "reset.active_low": true,
+        "reset.sync": true,
+        "host_if.endian": "little",
         "fifo.data_bits": 32,
         "fifo.depth": 1024,
         "fifo.iface": "ready_valid",
@@ -138,6 +160,9 @@
         "timing": { "read_latency_cycles": null }
       },
       "ask_order": [
+        "reset.active_low",
+        "reset.sync",
+        "host_if.endian",
         "host_if.bus",
         "host_if.data_bits",
         "host_if.addr_bits",
@@ -149,6 +174,9 @@
         "clock_mhz"
       ],
       "defaults": {
+        "reset.active_low": true,
+        "reset.sync": true,
+        "host_if.endian": "little",
         "host_if.bus": "AXI4-Lite",
         "host_if.data_bits": 32,
         "host_if.addr_bits": 15,
@@ -179,6 +207,9 @@
         }
       },
       "ask_order": [
+        "reset.active_low",
+        "reset.sync",
+        "host_if.endian",
         "regfile.entries",
         "regfile.data_bits",
         "regfile.read_ports",
@@ -188,6 +219,9 @@
         "clock_mhz"
       ],
       "defaults": {
+        "reset.active_low": true,
+        "reset.sync": true,
+        "host_if.endian": "little",
         "regfile.entries": 32,
         "regfile.data_bits": 32,
         "regfile.read_ports": 2,
@@ -225,6 +259,9 @@
         "ecc": { "enabled": false, "scheme": null }
       },
       "ask_order": [
+        "reset.active_low",
+        "reset.sync",
+        "host_if.endian",
         "host_if.bus",
         "host_if.data_bits",
         "host_if.addr_bits",
@@ -243,6 +280,9 @@
         "clock_mhz"
       ],
       "defaults": {
+        "reset.active_low": true,
+        "reset.sync": true,
+        "host_if.endian": "little",
         "host_if.bus": "AXI4",
         "host_if.data_bits": 64,
         "host_if.addr_bits": 24,
@@ -257,6 +297,7 @@
         "refresh.period_ns": 7800,
         "scheduler.policy": "FCFS",
         "ecc.enabled": false,
+        "ecc.scheme": "SECDED",
         "clock_mhz": 100
       }
     },
@@ -293,6 +334,9 @@
         "ecc": { "enabled": false, "scheme": null }
       },
       "ask_order": [
+        "reset.active_low",
+        "reset.sync",
+        "host_if.endian",
         "host_if.bus",
         "host_if.data_bits",
         "host_if.addr_bits",
@@ -314,6 +358,9 @@
         "clock_mhz"
       ],
       "defaults": {
+        "reset.active_low": true,
+        "reset.sync": true,
+        "host_if.endian": "little",
         "host_if.bus": "AXI4",
         "host_if.data_bits": 64,
         "host_if.addr_bits": 26,
@@ -331,6 +378,7 @@
         "refresh.period_ns": 7800,
         "scheduler.policy": "FR-FCFS",
         "ecc.enabled": false,
+        "ecc.scheme": "SECDED",
         "clock_mhz": 133
       }
     },
@@ -371,6 +419,9 @@
         "ecc": { "enabled": false, "scheme": null }
       },
       "ask_order": [
+        "reset.active_low",
+        "reset.sync",
+        "host_if.endian",
         "host_if.bus",
         "host_if.data_bits",
         "host_if.addr_bits",
@@ -394,6 +445,9 @@
         "clock_mhz"
       ],
       "defaults": {
+        "reset.active_low": true,
+        "reset.sync": true,
+        "host_if.endian": "little",
         "host_if.bus": "AXI4",
         "host_if.data_bits": 64,
         "host_if.addr_bits": 27,
@@ -413,6 +467,7 @@
         "refresh.period_ns": 7800,
         "scheduler.policy": "FR-FCFS",
         "ecc.enabled": false,
+        "ecc.scheme": "SECDED",
         "clock_mhz": 200
       }
     }
