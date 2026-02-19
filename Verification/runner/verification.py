@@ -322,6 +322,10 @@ class GuardedEditEngine:
             '{ "edits": [ {"name": "<REGION_NAME>", "code": "<raw SystemVerilog to insert>"} ] }\n'
             "Notes:\n"
             "- Keep code Verilator/icarus-compatible (SystemVerilog-2012 subset).\n"
+            "- Do not assign to expressions; LHS must be a variable or part-select.\n"
+            "- Do not use $error; use $display/$fatal only.\n"
+            "- When sampling read data, wait for rvalid if present, then sample on the next posedge to avoid races.\n"
+            "- Hold addr stable from request assertion through read-data capture; deassert req/we between transactions.\n"
             "- Use integers for timing cycles already computed for you in 'timing_cycles'.\n"
             "- Do not introduce file I/O, DPI, or non-determinism.\n"
             "- Only produce edits for the provided region names. Do NOT include any other region names.\n"
@@ -356,7 +360,10 @@ class GuardedEditEngine:
                 "Ensure endianness and byte-enable (be) handling are correct.",
                 "Use $fatal on mismatches; do not print RESULT here unless the region is specifically for results.",
                 "In procedural blocks, declare locals at the top before any statements.",
-                "Avoid 'final'; use an 'initial' with a wait-condition."
+                "Avoid 'final'; use an 'initial' with a wait-condition.",
+                "For reads, wait for rvalid (if present) and then sample rdata on next posedge; avoid same-cycle sampling.",
+                "Keep addr stable during request and until read data capture; deassert req/we between transactions.",
+                "After reset deassertion, wait 1-2 cycles before starting stimulus."
             ] + extra_tasks,
             "return_format": {
                 "edits": [

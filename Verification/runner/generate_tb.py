@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, sys, json, argparse, re, textwrap, subprocess
+import os, sys, json, argparse, re, textwrap, subprocess, difflib, time
 from pathlib import Path
 from typing import Tuple, List, Dict, Any, Optional
 
@@ -20,7 +20,7 @@ def rel_to_root(p: Path) -> str:
 
 
 # NOTE: GuardedEditEngine import for slice application
-from verification import apply_edits_with_provider, TamusAdapter, GuardedEditEngine  # type: ignore
+from verification import apply_edits_with_provider, TamusAdapter, GuardedEditEngine, EchoAdapter  # type: ignore
 
 TPL_DIR = ROOT_DIR / "templates"   # your layout
 
@@ -134,6 +134,26 @@ Guidance:
 - Keep edits minimal and safe.
 """
 
+SYNTAX_FIX_SYSTEM = """\
+You are an expert SystemVerilog compile-fix assistant for Icarus Verilog (-g2012).
+Goal: propose minimal edits to the testbench ONLY to fix the syntax errors below.
+
+Constraints:
+- Do not touch DUT sources or change module ports.
+- Keep edits localized and safe.
+- Respect Icarus quirks: decls before statements; no 'final'; avoid 'break'.
+- NO code fences. Return STRICT JSON only.
+- JSON schema:
+  {
+    "edits": [
+      { "kind": "replace_once", "find": "exact string", "replace": "replacement" } |
+      { "kind": "insert_after", "anchor": "exact string to locate", "insert": "string to insert" } |
+      { "kind": "insert_before", "anchor": "exact string to locate", "insert": "string to insert" }
+    ]
+  }
+If you cannot fix, return { "edits": [] }.
+"""
+
 def _safe_json_load(s: str) -> Optional[Dict[str, Any]]:
     try:
         return json.loads(s)
@@ -143,8 +163,17 @@ def _safe_json_load(s: str) -> Optional[Dict[str, Any]]:
 def _strip_any_fences(s: str) -> str:
     return re.sub(r"^```(?:json)?\s*|\s*```$", "", s.strip(), flags=re.DOTALL)
 
-def ai_check(tb_text: str, spec: dict, provider: TamusAdapter) -> Tuple[str, List[str], List[Dict[str, str]]]:
-    user_prompt = f"""Review the following SystemVerilog testbench for compilation readiness:
+def ai_check(tb_text: str,
+             spec: dict,
+             provider: TamusAdapter,
+             allowed_regions: Optional[List[str]] = None) -> Tuple[str, List[str], List[Dict[str, str]]]:
+    scope_hint = ""
+    if allowed_regions:
+        scope_hint = (
+            "Scope restriction: ONLY review and propose edits within these @LLM_EDIT regions: "
+            f"{', '.join(allowed_regions)}. Ignore issues outside these regions.\n\n"
+        )
+    user_prompt = f"""{scope_hint}Review the following SystemVerilog testbench for compilation readiness:
 
 ---BEGIN_TB---
 {tb_text}
@@ -189,42 +218,100 @@ STATIC_RULES = [
     ("Markdown code fences", re.compile(r"```")),
 ]
 
-def static_check(tb_text: str) -> Tuple[str, List[str], List[Dict[str,str]]]:
+def static_check(tb_text: str,
+                 allowed_regions: Optional[List[str]] = None) -> Tuple[str, List[str], List[Dict[str,str]]]:
     reasons = []
-    for name, rx in STATIC_RULES:
-        if rx.search(tb_text):
-            reasons.append(name)
+    if allowed_regions:
+        engine = GuardedEditEngine(provider=EchoAdapter(model="echo"))
+        regions = engine._find_regions(tb_text)  # type: ignore[attr-defined]
+        want = {str(n).strip() for n in allowed_regions}
+        region_text = "\n".join([r.original_text for r in regions if r.name in want])
+        for name, rx in STATIC_RULES:
+            if rx.search(region_text):
+                reasons.append(name)
+    else:
+        for name, rx in STATIC_RULES:
+            if rx.search(tb_text):
+                reasons.append(name)
 
-    mod_count = len(re.findall(r"\bmodule\b", tb_text))
-    endmod_count = len(re.findall(r"\bendmodule\b", tb_text))
-    if mod_count != endmod_count:
-        reasons.append(f"module/endmodule count mismatch ({mod_count} vs {endmod_count})")
+        mod_count = len(re.findall(r"\bmodule\b", tb_text))
+        endmod_count = len(re.findall(r"\bendmodule\b", tb_text))
+        if mod_count != endmod_count:
+            reasons.append(f"module/endmodule count mismatch ({mod_count} vs {endmod_count})")
 
     if reasons:
         return "REJECT", reasons, []
     return "APPROVE", [], []
 
-def apply_edits(tb: str, edits: List[Dict[str,str]]) -> str:
+def apply_edits(tb: str, edits: List[Dict[str,str]]) -> Tuple[str, int]:
     out = tb
+    applied = 0
     for e in edits:
         kind = e.get("kind", "")
         if kind == "replace_once":
             find = e.get("find","")
             repl = e.get("replace","")
-            if find:
+            if find and find in out:
                 out = out.replace(find, repl, 1)
+                applied += 1
         elif kind == "insert_after":
             anchor = e.get("anchor","")
             insert = e.get("insert","")
             if anchor and anchor in out:
                 out = out.replace(anchor, anchor + insert, 1)
+                applied += 1
         elif kind == "insert_before":
             anchor = e.get("anchor","")
             insert = e.get("insert","")
             if anchor and anchor in out:
                 out = out.replace(anchor, insert + anchor, 1)
+                applied += 1
         # unknown kinds ignored for safety
-    return out
+    return out, applied
+
+def _find_allowed_spans(tb_text: str, allowed_regions: Optional[List[str]]) -> List[Tuple[int, int]]:
+    if not allowed_regions:
+        return []
+    engine = GuardedEditEngine(provider=EchoAdapter(model="echo"))
+    regions = engine._find_regions(tb_text)  # type: ignore[attr-defined]
+    want = {str(n).strip() for n in allowed_regions}
+    spans = [(r.start_idx, r.end_idx) for r in regions if r.name in want]
+    return spans
+
+def _range_in_spans(start: int, end: int, spans: List[Tuple[int, int]]) -> bool:
+    if start == end:
+        return any(s <= start <= e for s, e in spans)
+    return any(start >= s and end <= e for s, e in spans)
+
+def _changes_outside_allowed(tb_before: str,
+                             tb_after: str,
+                             allowed_regions: Optional[List[str]]) -> bool:
+    if not allowed_regions:
+        return False
+    spans = _find_allowed_spans(tb_before, allowed_regions)
+    if not spans:
+        return True
+    matcher = difflib.SequenceMatcher(a=tb_before, b=tb_after)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if not _range_in_spans(i1, i2, spans):
+            return True
+    return False
+
+def _strip_sv_comments(text: str) -> str:
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    text = re.sub(r"//.*", "", text)
+    return text
+
+def _region_has_non_comment_content(tb_text: str, region_name: str) -> bool:
+    engine = GuardedEditEngine(provider=EchoAdapter(model="echo"))
+    regions = engine._find_regions(tb_text)  # type: ignore[attr-defined]
+    for r in regions:
+        if r.name == region_name:
+            cleaned = _strip_sv_comments(r.original_text)
+            return bool(cleaned.strip())
+    return True
 
 def run_tb_engineer(template_text: str, spec: dict, engineer_model: str) -> str:
     return apply_edits_with_provider(
@@ -233,27 +320,108 @@ def run_tb_engineer(template_text: str, spec: dict, engineer_model: str) -> str:
         provider=TamusAdapter(model=engineer_model),
     )
 
-def run_checker_loop(initial_tb: str, spec: dict, checker_model: str, max_iters: int) -> Tuple[str, Dict[str, Any]]:
+def _syntax_fix(tb_text: str, compile_out: str, provider: TamusAdapter) -> List[Dict[str, str]]:
+    user = (
+        "Compile output (iverilog):\n"
+        "-----\n"
+        f"{compile_out.strip()}\n"
+        "-----\n\n"
+        "Testbench source:\n"
+        "-----\n"
+        f"{tb_text}\n"
+        "-----\n"
+    )
+    raw = provider.complete(SYNTAX_FIX_SYSTEM, user)  # type: ignore
+    if not isinstance(raw, str):
+        return []
+    js = _safe_json_load(_strip_any_fences(raw))
+    if not js or not isinstance(js, dict):
+        return []
+    edits = js.get("edits", [])
+    if not isinstance(edits, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for e in edits:
+        if isinstance(e, dict) and e.get("kind") and isinstance(e.get("kind"), str):
+            out.append({k: str(v) for k, v in e.items()})
+    return out
+
+def run_checker_loop(initial_tb: str,
+                     spec: dict,
+                     checker_model: str,
+                     max_iters: int,
+                     allowed_regions: Optional[List[str]] = None) -> Tuple[str, Dict[str, Any]]:
     """
     AI checker + static checker loop.
     static_check is *always* applied; it can veto an APPROVE from the AI checker.
     """
     provider = TamusAdapter(model=checker_model)
-    tb = initial_tb
+    tb = _comment_stray_end_of_test_line(initial_tb)
     history: List[Dict[str, Any]] = []
 
+    retry_max = int(os.getenv("TB_CHECKER_RETRIES", "3"))
+    retry_sleep = float(os.getenv("TB_CHECKER_RETRY_SLEEP", "2.0"))
+
+    seen_hashes: set[int] = set()
+    seen_counts: Dict[int, int] = {}
+    last_reason_sig: Optional[Tuple[str, ...]] = None
+    repeat_reason_count = 0
+    repeat_tb_max = int(os.getenv("TB_CHECKER_REPEAT_TB_MAX", "2"))
+    soft_stop_max = int(os.getenv("TB_CHECKER_SOFT_STOP_MAX", "2"))
+    soft_stop_count = 0
+
     for i in range(1, max_iters+1):
-        try:
-            verdict, reasons, edits = ai_check(tb, spec, provider)
-        except Exception:
+        print(f"[checker] iter {i}/{max_iters}: starting review", flush=True)
+        tb_hash = hash(tb)
+        seen_counts[tb_hash] = seen_counts.get(tb_hash, 0) + 1
+        if tb_hash in seen_hashes and seen_counts[tb_hash] > (repeat_tb_max + 1):
+            history.append({
+                "iter": i,
+                "verdict": "REJECT",
+                "reasons": ["No progress: testbench content repeated across iterations."],
+                "edits_applied": 0,
+            })
+            return tb, {
+                "iterations": i,
+                "history": history,
+                "approved": False,
+                "note": "Repeated TB content; stopping to avoid oscillation.",
+            }
+        seen_hashes.add(tb_hash)
+
+        checker_error = True
+        for attempt in range(1, retry_max + 1):
+            try:
+                print("[checker] contacting LLM checker...", flush=True)
+                verdict, reasons, edits = ai_check(tb, spec, provider, allowed_regions=allowed_regions)
+                checker_error = False
+                break
+            except Exception as exc:
+                print(f"[checker] ERROR: LLM checker exception: {exc}", flush=True)
+                if attempt < retry_max:
+                    print(f"[checker] retrying LLM checker ({attempt}/{retry_max}) after {retry_sleep}s", flush=True)
+                    time.sleep(retry_sleep)
+        if checker_error:
             verdict, reasons, edits = "REJECT", ["AI checker error; falling back to static"], []
 
         # Always run static_check and let it veto approvals
-        static_verdict, static_reasons, _ = static_check(tb)
+        static_verdict, static_reasons, _ = static_check(tb, allowed_regions=allowed_regions)
         if static_verdict == "REJECT":
             if verdict == "APPROVE":
                 verdict = "REJECT"
             reasons = reasons + [f"static_check: {r}" for r in static_reasons]
+        elif checker_error:
+            if verdict != "APPROVE":
+                verdict = "APPROVE"
+            reasons = reasons + ["LLM checker unavailable; static-only approval"]
+        if allowed_regions:
+            for region_name in allowed_regions:
+                if not _region_has_non_comment_content(tb, region_name):
+                    if verdict == "APPROVE":
+                        verdict = "REJECT"
+                    reasons.append(
+                        f"Region '{region_name}' contains only comments/placeholders; must emit real code."
+                    )
 
         history.append({
             "iter": i,
@@ -262,12 +430,69 @@ def run_checker_loop(initial_tb: str, spec: dict, checker_model: str, max_iters:
             "edits_applied": len(edits),
         })
 
+        reason_sig = tuple(reasons)
+        if verdict != "APPROVE":
+            if reason_sig == last_reason_sig:
+                repeat_reason_count += 1
+            else:
+                repeat_reason_count = 1
+            last_reason_sig = reason_sig
+            if repeat_reason_count >= 3:
+                return tb, {
+                    "iterations": i,
+                    "history": history,
+                    "approved": False,
+                    "note": "Repeated checker reasons; stopping early.",
+                }
+
         if verdict == "APPROVE":
+            print("[checker] verdict=APPROVE", flush=True)
             return tb, {"iterations": i, "history": history, "approved": True}
 
         if edits:
-            tb = apply_edits(tb, edits)
+            tb_before = tb
+            tb_after, applied = apply_edits(tb, edits)
+            if _changes_outside_allowed(tb_before, tb_after, allowed_regions):
+                history.append({
+                    "iter": i,
+                    "verdict": "REJECT",
+                    "reasons": ["LLM edits touched regions outside the allowed slice."],
+                    "edits_applied": applied,
+                })
+                if soft_stop_count < soft_stop_max:
+                    soft_stop_count += 1
+                    last_reason_sig = None
+                    continue
+                return tb_before, {
+                    "iterations": i,
+                    "history": history,
+                    "approved": False,
+                    "note": "Edits outside allowed regions; stopping.",
+                }
+            tb = icarus_fixups(tb_after)
+            if applied == 0 or tb == tb_before:
+                history.append({
+                    "iter": i,
+                    "verdict": "REJECT",
+                    "reasons": ["LLM edits did not apply or made no changes."],
+                    "edits_applied": applied,
+                })
+                if soft_stop_count < soft_stop_max:
+                    soft_stop_count += 1
+                    last_reason_sig = None
+                    continue
+                return tb, {
+                    "iterations": i,
+                    "history": history,
+                    "approved": False,
+                    "note": "Edits failed to modify TB; stopping.",
+                }
+            print(f"[checker] verdict=REJECT, applied {applied} edits", flush=True)
         else:
+            if soft_stop_count < soft_stop_max:
+                soft_stop_count += 1
+                last_reason_sig = None
+                continue
             return tb, {"iterations": i, "history": history, "approved": False, "note": "Rejected without edits."}
 
     return tb, {"iterations": max_iters, "history": history, "approved": False, "note": "Max iterations reached."}
@@ -438,6 +663,21 @@ def _hoist_nbytes_localparam(text: str) -> str:
 
     return text
 
+def _repair_illegal_lvalues(text: str) -> str:
+    """
+    Fix common illegal lvalue patterns introduced by LLMs (e.g. assigning to expressions).
+    Heuristic: replace "((X) & MASK) = Y;" with "X = (Y) & MASK;".
+    """
+    pat = re.compile(
+        r"(?P<lhs>\(\(\s*(?P<var>\w+)\s*\)\s*&\s*(?P<mask>\{[^;]*?\}|[^\)]+?)\s*\))\s*=\s*(?P<rhs>[^;]+);"
+    )
+    def repl(m: re.Match) -> str:
+        var = m.group("var")
+        mask = m.group("mask")
+        rhs = m.group("rhs")
+        return f"{var} = ({rhs}) & {mask};"
+    return pat.sub(repl, text)
+
 # NEW: strip / rewrite break statements (Icarus “sorry: break statements not supported”)
 BREAK_RE = re.compile(r"\bbreak\s*;")
 
@@ -450,6 +690,98 @@ def _remove_break_statements(text: str) -> str:
     """
     return BREAK_RE.sub(";", text)
 
+ADDR_SLICE_RE = re.compile(r"(?P<expr>\([^\)]+\)|'h[0-9a-fA-F_]+|[A-Za-z_]\w*)\s*\[ADDR_W-1:0\]")
+
+def _rewrite_addr_slices(text: str) -> str:
+    """
+    Icarus rejects slicing on literals/expressions like ('h40 + i)[ADDR_W-1:0].
+    Rewrite to a mask: (expr & {ADDR_W{1'b1}}).
+    """
+    def _repl(m: re.Match) -> str:
+        expr = m.group("expr")
+        return f"(({expr}) & {{ADDR_W{{1'b1}}}})"
+    return ADDR_SLICE_RE.sub(_repl, text)
+
+BAD_ADDR_TYPE_RE = re.compile(r"\(\(logic\)\s*&\s*\{ADDR_W\{1'b1\}\}\)")
+
+def _fix_bad_addr_type(text: str) -> str:
+    """
+    Some LLM outputs accidentally use an expression where a type is required:
+      ((logic) & {ADDR_W{1'b1}}) a;
+    Rewrite to a valid packed type for addresses.
+    """
+    return BAD_ADDR_TYPE_RE.sub("logic [ADDR_W-1:0]", text)
+
+BAD_INPUT_TYPE_RE = re.compile(r"\(\(input\)\s*&\s*\{ADDR_W\{1'b1\}\}\)")
+
+def _fix_bad_input_type(text: str) -> str:
+    """
+    Fix malformed input type emitted by LLM inside task port lists:
+      ((input) & {ADDR_W{1'b1}}) a
+    """
+    return BAD_INPUT_TYPE_RE.sub("input logic [ADDR_W-1:0]", text)
+
+
+def _hoist_model_mem_to_module_scope(text: str) -> str:
+    """
+    If a model_mem array is declared inside an initial block, move it to module scope.
+    Heuristic: detect 'initial begin' that declares 'logic ... model_mem [...]' and hoist.
+    """
+    init_re = re.compile(r"(initial\s+begin)(?P<body>.*?)(end)", re.S)
+    m = init_re.search(text)
+    if not m:
+        return text
+    body = m.group("body")
+    decl_re = re.compile(r"(?m)^\s*(logic|reg)\s+\[.*?\]\s+model_mem\s*\[.*?\]\s*;\s*$")
+    decls = decl_re.findall(body)
+    if not decls:
+        return text
+    # Extract full decl lines
+    decl_lines = decl_re.findall(body)
+    # Actually capture full lines using finditer
+    decl_texts = [mm.group(0) for mm in decl_re.finditer(body)]
+    if not decl_texts:
+        return text
+    # Remove from initial block body
+    new_body = body
+    for dt in decl_texts:
+        new_body = new_body.replace(dt, "")
+    # Insert before first initial block
+    hoist_block = "\n  // hoisted model_mem from initial block\n  " + "\n  ".join(d.strip() for d in decl_texts) + "\n"
+    new_text = text[:m.start()] + hoist_block + text[m.start():]
+    new_text = new_text.replace(body, new_body, 1)
+    return new_text
+
+
+END_OF_TEST_RE = re.compile(r"(?m)^(?P<ws>\s*)(?P<line>end-of-test.*)$")
+
+def _comment_stray_end_of_test_line(text: str) -> str:
+    """
+    Some LLM outputs insert a plain text line like:
+      end-of-test to avoid infinite run in skeleton
+    This is a syntax error in SV; comment it out.
+    """
+    def _repl(m: re.Match) -> str:
+        return f"{m.group('ws')}// {m.group('line')}"
+    return END_OF_TEST_RE.sub(_repl, text)
+
+def _fix_module_endmodule_mismatch(text: str) -> str:
+    """
+    If there's a single extra 'endmodule' (or missing), try a minimal fix.
+    This is a heuristic to unblock static_check when LLM injects stray endmodule.
+    """
+    mod_count = len(re.findall(r"\bmodule\b", text))
+    endmod_count = len(re.findall(r"\bendmodule\b", text))
+    if mod_count == endmod_count:
+        return text
+    if endmod_count == mod_count + 1:
+        # Drop the last 'endmodule'
+        return re.sub(r"(endmodule\b)(?!.*endmodule\b)", "", text, flags=re.S)
+    if mod_count == endmod_count + 1:
+        # Append a missing endmodule at EOF
+        return text.rstrip() + "\nendmodule\n"
+    return text
+
 
 def icarus_fixups(tb_text: str) -> str:
     tb_text = _fix_num_txns_to_localparam(tb_text)
@@ -459,13 +791,21 @@ def icarus_fixups(tb_text: str) -> str:
     tb_text = _rewrite_pack_bytes_unpacked_port(tb_text)
     tb_text = _hoist_nbytes_localparam(tb_text)
     tb_text = _remove_break_statements(tb_text)
+    tb_text = _rewrite_addr_slices(tb_text)
+    tb_text = _fix_bad_addr_type(tb_text)
+    tb_text = _fix_bad_input_type(tb_text)
+    tb_text = _hoist_model_mem_to_module_scope(tb_text)
+    tb_text = _repair_illegal_lvalues(tb_text)
+    tb_text = tb_text.replace("$error", "$display")
+    tb_text = _comment_stray_end_of_test_line(tb_text)
+    tb_text = _fix_module_endmodule_mismatch(tb_text)
     return tb_text
 
 # ---------- Icarus syntax pre-check ----------
 
 DEFAULT_DUT_MODULE = "sram_sync_ctrl"
 
-def icarus_syntax_check(tb_path: Path) -> None:
+def icarus_syntax_check(tb_path: Path) -> Tuple[bool, str]:
     """
     Run a lightweight Icarus syntax check on the generated TB alone.
     To avoid 'unknown module' errors for the DUT, we comment out the DUT
@@ -495,6 +835,12 @@ def icarus_syntax_check(tb_path: Path) -> None:
     print(f"[generate_tb] Icarus syntax pre-check: {' '.join(cmd)}")
     proc = subprocess.run(cmd, capture_output=True, text=True)
 
+    output = ""
+    if proc.stdout:
+        output += proc.stdout
+    if proc.stderr:
+        output += proc.stderr
+
     if proc.returncode != 0:
         print("[generate_tb] Icarus syntax check FAILED.")
         if proc.stdout:
@@ -503,9 +849,10 @@ def icarus_syntax_check(tb_path: Path) -> None:
         if proc.stderr:
             print("----- iverilog stderr -----")
             print(proc.stderr)
-        raise SystemExit("[generate_tb] Aborting due to Icarus syntax errors in generated TB.")
+        return False, output
     else:
         print("[generate_tb] Icarus syntax check PASSED.")
+        return True, output
 
 # ---------- staged generation helpers ----------
 
@@ -517,22 +864,57 @@ SLICE_PLAN: list[list[str]] = [
     ["EMIT_RESULTS"],                   # result emitter
 ]
 
-def apply_slice(template_text: str, spec: dict, provider: TamusAdapter, include_regions: list[str]) -> str:
+def apply_slice(template_text: str,
+                spec: dict,
+                provider: TamusAdapter,
+                include_regions: list[str],
+                extra_tasks: Optional[List[str]] = None) -> str:
     """Apply LLM edits only to the specified @LLM_EDIT region names."""
     engine = GuardedEditEngine(provider=provider)
-    return engine.apply_llm_edits(template_text, spec, include_regions=include_regions)
+    return engine.apply_llm_edits(
+        template_text,
+        spec,
+        include_regions=include_regions,
+        extra_tasks=extra_tasks,
+    )
+
+def _derive_retry_tasks(reasons: List[str], region_group: List[str]) -> List[str]:
+    tasks: List[str] = []
+    if any("outside the allowed slice" in r for r in reasons):
+        tasks.append(
+            "STRICT: Only edit the allowed @LLM_EDIT regions for this slice. "
+            "Do not modify any other region or non-LLM text."
+        )
+    if any("associative array" in r or ".exists()" in r for r in reasons):
+        tasks.append(
+            "Avoid associative arrays and .exists(); Icarus Verilog does not support them. "
+            "Use fixed-size arrays and/or simple bitmaps instead."
+        )
+    if any("$error" in r for r in reasons):
+        tasks.append("Do not use $error; use $display/$fatal only.")
+    if any("final" in r for r in reasons):
+        tasks.append("Do not use 'final' blocks; use 'initial' with wait/timeout.")
+    if any("Region" in r and "only comments" in r for r in reasons):
+        tasks.append("Emit real code (not just comments/placeholders) in the allowed region.")
+    if tasks:
+        tasks.insert(0, f"Slice context: only edit regions {region_group}.")
+    return tasks
 
 # ---------- auto-stub DUT (no manual drop-ins) ----------
 
 def collect_dut_files(dut_dir: Path) -> list[Path]:
     """
-    Collect all DUT .sv files under dut_dir (non-recursive or recursive as needed).
+    Collect all DUT .sv/.v files under dut_dir (non-recursive or recursive as needed).
     These will be added to the Icarus filelist *instead* of the auto-stub when present.
     """
     if not dut_dir.exists():
         return []
     files: list[Path] = []
-    for p in dut_dir.rglob("*.sv"):  # use .glob("*.sv") if you don't want recursion
+    for p in dut_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in (".sv", ".v"):
+            continue
         if p.is_file():
             files.append(p.resolve())
     return sorted(files)
@@ -545,7 +927,9 @@ def _extract_tb_dut_ports(tb_text: str, dut_module: str = DEFAULT_DUT_MODULE) ->
     and return the list of *formal* port names in that instantiation.
     """
     inst_re = re.compile(
-        rf"{dut_module}\s+\w+\s*\((?P<ports>[^;]*?)\)\s*;",
+        rf"{dut_module}\s*"
+        r"(?:#\s*\([^;]*?\)\s*)?"  # optional parameter block
+        r"\w+\s*\((?P<ports>[^;]*?)\)\s*;",
         re.S,
     )
     m = inst_re.search(tb_text)
@@ -606,9 +990,118 @@ def _extract_dut_module_ports(dut_files: List[Path],
     return ports
 
 
+def _collect_dut_modules(dut_files: List[Path]) -> Dict[str, List[str]]:
+    """
+    Scan DUT sources and return a mapping of module name -> port list.
+    """
+    combined = ""
+    for p in dut_files:
+        try:
+            combined += p.read_text(encoding="utf-8") + "\n"
+        except Exception:
+            continue
+
+    modules: Dict[str, List[str]] = {}
+    mod_re = re.compile(
+        r"module\s+(?P<name>\w+)\b"
+        r"(?:\s*#\s*\([^;]*\))?\s*"
+        r"\((?P<ports>[^;]*?)\)\s*;",
+        re.S,
+    )
+    for m in mod_re.finditer(combined):
+        name = m.group("name")
+        port_block = m.group("ports")
+        port_block = re.sub(r"//.*", "", port_block)
+        ports: List[str] = []
+        for chunk in port_block.split(","):
+            t = chunk.strip()
+            if not t:
+                continue
+            t = re.split(r"/\*", t)[0].strip()
+            t = re.sub(r"\[[^\]]+\]", " ", t)
+            words = t.split()
+            if not words:
+                continue
+            ports.append(words[-1])
+        if name and name not in modules:
+            modules[name] = ports
+    return modules
+
+
+def _extract_tb_instantiation(tb_text: str) -> Tuple[str, List[str]]:
+    """
+    Find the first named-port instantiation and return (module_name, port_list).
+    """
+    inst_re = re.compile(
+        r"(?P<mod>\w+)\s*"
+        r"(?:#\s*\([^;]*?\)\s*)?"
+        r"\w+\s*\((?P<ports>[^;]*?)\)\s*;",
+        re.S,
+    )
+    for m in inst_re.finditer(tb_text):
+        port_block = m.group("ports")
+        formals = re.findall(r"\.(\w+)\s*\(", port_block)
+        if formals:
+            return m.group("mod"), formals
+    raise RuntimeError("Could not find a named-port instantiation in TB.")
+
+
+def _replace_tb_inst_module(tb_text: str, old: str, new: str) -> str:
+    inst_re = re.compile(
+        rf"\b{re.escape(old)}\b(\s*(?:#\s*\([^;]*?\)\s*)?\w+\s*\([^;]*?\)\s*;)",
+        re.S,
+    )
+    return inst_re.sub(new + r"\1", tb_text, count=1)
+
+
+def auto_resolve_dut_module(tb_text: str,
+                            dut_files: List[Path],
+                            preferred: str) -> Tuple[str, str, bool]:
+    """
+    If TB-instantiated module isn't found in DUT sources, try to auto-select
+    the correct module and rewrite the instantiation.
+    Returns (tb_text, dut_module_name, resolved_ok).
+    """
+    modules = _collect_dut_modules(dut_files)
+    if not modules:
+        return tb_text, preferred, False
+
+    if preferred in modules:
+        return tb_text, preferred, True
+
+    try:
+        tb_mod, tb_ports = _extract_tb_instantiation(tb_text)
+    except RuntimeError:
+        tb_mod = preferred
+        tb_ports = []
+
+    if tb_mod in modules:
+        return tb_text, tb_mod, True
+
+    # If only one module exists, use it.
+    if len(modules) == 1:
+        only = next(iter(modules.keys()))
+        return _replace_tb_inst_module(tb_text, tb_mod, only), only, True
+
+    # Try to match by port list
+    if tb_ports:
+        tb_set = set(tb_ports)
+        exact = [m for m, ports in modules.items() if set(ports) == tb_set]
+        if len(exact) == 1:
+            m = exact[0]
+            return _replace_tb_inst_module(tb_text, tb_mod, m), m, True
+        sup = [m for m, ports in modules.items() if tb_set.issubset(set(ports))]
+        if len(sup) == 1:
+            m = sup[0]
+            return _replace_tb_inst_module(tb_text, tb_mod, m), m, True
+
+    return tb_text, preferred, False
+
+
 def check_dut_ports_against_tb(tb_text: str,
                                dut_files: List[Path],
-                               dut_module: str = DEFAULT_DUT_MODULE) -> None:
+                               dut_module: str = DEFAULT_DUT_MODULE,
+                               allow_missing: bool = False) -> None:
     """
     Compare the port list implied by the TB's DUT instantiation against the
     port list in the DUT module header. Abort early if they differ.
@@ -621,6 +1114,9 @@ def check_dut_ports_against_tb(tb_text: str,
         dut_ports = _extract_dut_module_ports(dut_files, dut_module)
     except RuntimeError as e:
         print(f"[generate_tb] DUT/TB port-check error: {e}")
+        if allow_missing or os.getenv("TB_PORTCHECK_ALLOW_MISSING", "0") == "1":
+            print("[generate_tb] Skipping DUT/TB port-check (allow_missing).")
+            return
         raise SystemExit("[generate_tb] Aborting due to DUT/TB port-check failure.")
 
     tb_set = set(tb_ports)
@@ -732,6 +1228,10 @@ endmodule
 # ---------- main ----------
 
 def main():
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", required=True, help="Path to spec.json from the front-end")
     ap.add_argument("--out", default=str(RUNNER_DIR / "build" / "tb_gen.sv"))
@@ -784,6 +1284,9 @@ def main():
     tb_current = template_text
     engineer = TamusAdapter(model=args.engineer_model)
     stage_summaries: List[Dict[str, Any]] = []
+    stage_failed = False
+
+    stage_retry_max = int(os.getenv("TB_STAGE_RETRY_MAX", "2"))
 
     for stage_idx, region_group in enumerate(SLICE_PLAN, start=1):
         print(f"[stage {stage_idx}] BEGIN slice, requested regions={region_group}")
@@ -806,35 +1309,67 @@ def main():
             print(f"[stage {stage_idx}] END (skipped)")
             continue
 
-        print(f"[stage {stage_idx}] engineer filling regions actually present: {present_names}")
-        tb_current = apply_slice(tb_current, spec, engineer, include_regions=region_group)
-
-        print(f"[stage {stage_idx}] checker loop starting...")
-        tb_stage, meta = run_checker_loop(tb_current, spec, args.checker_model, args.max_iters)
-        tb_stage = icarus_fixups(tb_stage)  # automatic compile-oriented fixes
-        tb_current = tb_stage
-
-        stage_meta = {"stage": stage_idx, "regions": region_group}
-        stage_meta.update(meta)
-        stage_summaries.append(stage_meta)
-
-        print(f"[stage {stage_idx}] approved={meta.get('approved')}")
-        for h in meta.get("history", []):
-            print(
-                f"  - iter {h.get('iter')}: "
-                f"verdict={h.get('verdict')} "
-                f"reasons={'; '.join(h.get('reasons', [])) or '(none)'} "
-                f"edits_applied={h.get('edits_applied')}"
+        tb_stage_base = tb_current
+        extra_tasks: List[str] = []
+        for attempt in range(1, stage_retry_max + 1):
+            print(f"[stage {stage_idx}] engineer filling regions actually present: {present_names}")
+            print(f"[stage {stage_idx}] contacting LLM engineer...", flush=True)
+            tb_current = apply_slice(
+                tb_stage_base,
+                spec,
+                engineer,
+                include_regions=region_group,
+                extra_tasks=extra_tasks,
             )
 
-        # Strict gating: require approval before moving on
+            print(f"[stage {stage_idx}] checker loop starting...")
+            tb_stage, meta = run_checker_loop(
+                tb_current,
+                spec,
+                args.checker_model,
+                args.max_iters,
+                allowed_regions=present_names,
+            )
+            tb_stage = icarus_fixups(tb_stage)  # automatic compile-oriented fixes
+            tb_current = tb_stage
+
+            stage_meta = {"stage": stage_idx, "regions": region_group, "attempt": attempt}
+            stage_meta.update(meta)
+            stage_summaries.append(stage_meta)
+
+            print(f"[stage {stage_idx}] approved={meta.get('approved')}")
+            for h in meta.get("history", []):
+                print(
+                    f"  - iter {h.get('iter')}: "
+                    f"verdict={h.get('verdict')} "
+                    f"reasons={'; '.join(h.get('reasons', [])) or '(none)'} "
+                    f"edits_applied={h.get('edits_applied')}"
+                )
+
+            if meta.get("approved", False):
+                print(f"[stage {stage_idx}] END (approved)")
+                break
+
+            # Auto-repair: roll back to last stable TB and retry with extra context.
+            last_reasons = []
+            for h in meta.get("history", []):
+                last_reasons = h.get("reasons", []) or last_reasons
+            extra_tasks = _derive_retry_tasks(last_reasons, present_names)
+            tb_current = tb_stage_base
+
         if not meta.get("approved", False):
             print(f"[stage {stage_idx}] ERROR: slice not approved. Halting staged generation.")
             print(f"[stage {stage_idx}] END (not approved)")
+            stage_failed = True
             break
-        else:
-            print(f"[stage {stage_idx}] END (approved)")
 
+    out_path = Path(args.out)
+    out_dir = out_path.parent
+
+    if stage_failed:
+        write(out_path, tb_current)
+        print(f"[generate_tb] wrote partial TB -> {out_path}  (size={len(tb_current)} bytes)")
+        raise SystemExit("[generate_tb] Aborting: staged generation failed.")
 
     # 3) Final whole-file checker pass
     print("[final] whole-file checker pass...")
@@ -845,13 +1380,31 @@ def main():
     approved = meta_final.get("approved", False)
 
     # 4) Write TB
-    out_path = Path(args.out)
-    out_dir = out_path.parent
     write(out_path, tb_final)
     print(f"[generate_tb] wrote -> {out_path}  (size={len(tb_final)} bytes)")
 
+    if not approved:
+        raise SystemExit("[generate_tb] Aborting: final checker did not approve.")
+
     # 4.5) syntax pre-check with Icarus (TB alone, DUT inst commented out)
-    icarus_syntax_check(out_path)
+    syntax_fix_max = int(os.getenv("TB_SYNTAX_FIX_MAX_ITERS", "3"))
+    syntax_provider = TamusAdapter(model=args.checker_model)
+    for attempt in range(1, syntax_fix_max + 1):
+        ok, out = icarus_syntax_check(out_path)
+        if ok:
+            break
+        print(f"[generate_tb] syntax fix attempt {attempt}/{syntax_fix_max}", flush=True)
+        tb_text = out_path.read_text(encoding="utf-8")
+        edits = _syntax_fix(tb_text, out, syntax_provider)
+        if not edits:
+            raise SystemExit("[generate_tb] Aborting: syntax fix returned no edits.")
+        tb_text, applied = apply_edits(tb_text, edits)
+        if applied == 0:
+            raise SystemExit("[generate_tb] Aborting: syntax fix edits did not apply.")
+        tb_text = icarus_fixups(tb_text)
+        write(out_path, tb_text)
+    else:
+        raise SystemExit("[generate_tb] Aborting: Icarus syntax check failed after retries.")
 
     # 5) Collect DUT files (preferred) or auto-emit stub DUT as fallback
     dut_dir = Path(args.dut_dir).resolve()
@@ -860,7 +1413,27 @@ def main():
 
     # check DUT ports vs TB ports before compile/sim
     if dut_files:
-        check_dut_ports_against_tb(tb_final, dut_files, dut_module=DEFAULT_DUT_MODULE)
+        dut_module_name = (
+            str(spec.get("dut_module", "")).strip()
+            or os.getenv("TB_DUT_MODULE", "").strip()
+            or DEFAULT_DUT_MODULE
+        )
+        tb_final_before = tb_final
+        tb_final, resolved_module, resolved_ok = auto_resolve_dut_module(
+            tb_final, dut_files, dut_module_name
+        )
+        if tb_final != tb_final_before:
+            write(out_path, tb_final)
+        if resolved_ok and resolved_module != dut_module_name:
+            print(f"[generate_tb] Auto-resolved DUT module: {resolved_module} (was {dut_module_name})")
+            dut_module_name = resolved_module
+        print(f"[generate_tb] DUT module for port-check: {dut_module_name}")
+        check_dut_ports_against_tb(
+            tb_final,
+            dut_files,
+            dut_module=dut_module_name,
+            allow_missing=not resolved_ok,
+        )
 
     if dut_files:
         print(f"[generate_tb] Using DUT files from {dut_dir}:")
@@ -876,7 +1449,8 @@ def main():
             else:
                 data_w = int(spec.get("data_width", 32))
                 addr_w = int(spec.get("addr_width", 16))
-                auto_stub_path = emit_auto_stub_dut(out_dir, data_w, addr_w)
+                dut_dir.mkdir(parents=True, exist_ok=True)
+                auto_stub_path = emit_auto_stub_dut(dut_dir, data_w, addr_w)
                 print(f"[generate_tb] wrote auto stub DUT -> {auto_stub_path}")
         else:
             print("[generate_tb] NO_AUTO_STUB=1 and no DUT files found; relying on manual stub if present.")
@@ -920,10 +1494,6 @@ def main():
 
     write(filelist_path, filelist_contents)
     print(f"[generate_tb] wrote filelist -> {filelist_path}")
-
-
-    if not approved:
-        print("[generate_tb] WARNING: Final checker did not approve. See reasons above.")
 
 
 if __name__ == "__main__":

@@ -122,6 +122,8 @@ module tb;
   // ------------------------------
   int                err_count = 0;
   int                txn_count = 0;
+  logic              done = 1'b0;
+  int                TB_TIMEOUT_CYC = 1000;
   logic [DATA_W-1:0] got_q, exp_q;
 
   task automatic check_eq(input [DATA_W-1:0] exp, input [DATA_W-1:0] got, input [ADDR_W-1:0] a);
@@ -157,6 +159,7 @@ module tb;
   //     check_eq(exp_q, got_q, a);
   //     txn_count++;
   //   end
+  //   done = 1'b1;
   // end
   // @LLM_EDIT END MAIN_SCENARIO
 
@@ -164,12 +167,26 @@ module tb;
   // Emit machine-readable result
   // ------------------------------
   // @LLM_EDIT BEGIN EMIT_RESULTS
-  // final begin
-  //   if (err_count == 0 && txn_count >= NUM_TXNS) $display("RESULT: PASS");
-  //   else begin
-  //     $display("RESULT: FAIL");
-  //     $fatal(1);
-  //   end
+  // initial begin
+  //   // watchdog
+  //   TB_TIMEOUT_CYC = (NUM_TXNS > 0) ? (NUM_TXNS * 20) : 1000;
+  //   fork
+  //     begin
+  //       repeat (TB_TIMEOUT_CYC) @(posedge clk);
+  //       $display("RESULT: FAIL");
+  //       $fatal(1);
+  //     end
+  //     begin
+  //       wait (done);
+  //       if (err_count == 0 && txn_count >= NUM_TXNS) $display("RESULT: PASS");
+  //       else begin
+  //         $display("RESULT: FAIL");
+  //         $fatal(1);
+  //       end
+  //       $finish;
+  //     end
+  //   join_any
+  //   disable fork;
   // end
   // @LLM_EDIT END EMIT_RESULTS
 

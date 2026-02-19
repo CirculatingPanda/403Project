@@ -2,7 +2,8 @@ Param(
   [string]$Spec = "specs\sram_controller_2025-11-03_08-29-11.json",
   [int]$MaxIters = [int](@($env:TB_CHECKER_MAX_ITERS, 10) | Where-Object { $_ -ne $null } | Select-Object -First 1),
   [string]$LogDir = "logs",
-  [switch]$Verbose
+  [switch]$Verbose,
+  [switch]$CleanOnly
 )
 
 # ------------------------------
@@ -17,6 +18,7 @@ Write-Host ""
 if (-not $env:LLM_PROVIDER) {
   $env:LLM_PROVIDER = "tamu"
 }
+$env:PYTHONUNBUFFERED = "1"
 
 # Ensure dirs exist
 New-Item -ItemType Directory -Force -Path build | Out-Null
@@ -40,6 +42,44 @@ function Fail-And-Exit {
     Write-Host "See log: $LogPath" -ForegroundColor Yellow
   }
   exit $Code
+}
+
+function Clear-RunArtifacts {
+  param(
+    [string]$LogDir = "logs"
+  )
+  $generatedLogs = @(
+    "01_generate_tb.log",
+    "02_compile.log",
+    "02_compile_fix.log",
+    "03_sim.log",
+    "03_sim_fix.log"
+  )
+  foreach ($log in $generatedLogs) {
+    $path = Join-Path $LogDir $log
+    if (Test-Path $path) {
+      Remove-Item -Force $path
+    }
+  }
+
+  $generatedBuildFiles = @(
+    "build\\tb_gen.sv",
+    "build\\tb_gen_syntax.sv",
+    "build\\auto_stub_dut.sv",
+    "build\\filelist.f",
+    "build\\sim"
+  )
+  foreach ($file in $generatedBuildFiles) {
+    if (Test-Path $file) {
+      Remove-Item -Force $file
+    }
+  }
+}
+
+if ($CleanOnly) {
+  Clear-RunArtifacts -LogDir $LogDir
+  Write-Host "Cleanup complete for LogDir '$LogDir'." -ForegroundColor Green
+  exit 0
 }
 
 # ------------------------------

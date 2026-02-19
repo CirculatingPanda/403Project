@@ -29,6 +29,16 @@ def read(p: Path) -> str:
         return p.read_text(encoding="utf-8", errors="replace")
 
 
+def parse_spec(spec_text: str) -> Dict[str, Any]:
+    try:
+        obj = json.loads(spec_text)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+    return {}
+
+
 def write(p: Path, s: str) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(s, encoding="utf-8")
@@ -159,6 +169,7 @@ TRIAGE_SYSTEM = """\
 You are a SystemVerilog verification triage assistant.
 Given a DUT, a testbench, a spec, and failing simulation output, decide
 whether the failure is more likely due to a BAD TESTBENCH or a BAD DUT.
+Assume the DUT is intended to be correct unless there is strong evidence otherwise.
 
 Return STRICT JSON only:
 {
@@ -175,6 +186,11 @@ Constraints:
 - Do not touch DUT sources or change module ports.
 - Keep edits localized and safe; avoid overfitting.
 - Respect Icarus quirks: decls before statements; no 'final'; avoid 'break'.
+- Prefer blocking assignments for stimulus inside tasks to avoid NBA races.
+- Sample read data only after rvalid is asserted, and add a tiny delay (#1step or next posedge)
+  to avoid NBA race with DUT.
+- Respect timing parameters from TIMING_CYCLES (T_RD_LAT_CYC, T_WR_LAT_CYC, T_GAP_CYC).
+- Keep addresses within valid depth if spec provides it (depth = 2**addr_width or explicit depth).
 - NO code fences. Return STRICT JSON only.
 - JSON schema:
   {
@@ -194,14 +210,17 @@ testbench changes before re-running compilation/simulation.
 Return STRICT JSON only:
 {
   "verdict": "APPROVE" | "REJECT",
-  "reasons": ["short reason", ...]
+  "reasons": ["short reason", ...],
+  "required_fixes": ["actionable fix", ...]
 }
 """
 
 
-def llm_triage(provider, dut_text: str, tb_text: str, spec_text: str, sim_out: str, failed_log: str) -> Dict[str, Any]:
+def llm_triage(provider, dut_text: str, tb_text: str, spec_text: str, sim_out: str, failed_log: str,
+               spec_summary: str) -> Dict[str, Any]:
     user = (
         "SPEC:\n-----\n" + spec_text.strip() + "\n-----\n\n"
+        "SPEC_SUMMARY:\n-----\n" + spec_summary + "\n-----\n\n"
         "DUT:\n-----\n" + dut_text.strip() + "\n-----\n\n"
         "TESTBENCH:\n-----\n" + tb_text.strip() + "\n-----\n\n"
         "FAILED SIM LOG (original):\n-----\n" + failed_log.strip() + "\n-----\n\n"
@@ -220,9 +239,101 @@ def llm_triage(provider, dut_text: str, tb_text: str, spec_text: str, sim_out: s
     return {"verdict": verdict, "reasons": reasons}
 
 
-def llm_fix(provider, tb_text: str, spec_text: str, sim_out: str) -> List[Dict[str, str]]:
+def _parse_mismatch_addrs(sim_out: str) -> List[int]:
+    addrs: List[int] = []
+    for m in re.finditer(r"addr=0x([0-9a-fA-F]+)", sim_out):
+        try:
+            addrs.append(int(m.group(1), 16))
+        except Exception:
+            continue
+    return addrs
+
+
+def _detect_off_by_one_pattern(sim_out: str) -> bool:
+    """
+    Heuristic: if consecutive mismatches often occur at A and A+1,
+    treat as an address shift symptom.
+    """
+    addrs = _parse_mismatch_addrs(sim_out)
+    if len(addrs) < 4:
+        return False
+    hits = 0
+    for i in range(1, len(addrs)):
+        if addrs[i] - addrs[i - 1] == 1:
+            hits += 1
+    return hits >= max(2, len(addrs) // 3)
+
+
+def _dut_uses_addr_plus_one(dut_text: str) -> bool:
+    """
+    Heuristic: look for addr+1 usage in memory indexing or registered address.
+    """
+    patterns = [
+        r"\baddr\b\s*\+\s*1",
+        r"\baddr\b\s*\+\s*'d1",
+        r"\baddr\b\s*\+\s*1'b1",
+        r"\baddr\b\s*\+\s*8'd1",
+    ]
+    if not dut_text:
+        return False
+    for pat in patterns:
+        if re.search(pat, dut_text):
+            return True
+    return False
+
+
+def heuristic_triage(dut_text: str, sim_out: str) -> Dict[str, Any]:
+    """
+    Lightweight heuristic triage using DUT source patterns + sim mismatch patterns.
+    """
+    reasons: List[str] = []
+    off_by_one = _detect_off_by_one_pattern(sim_out)
+    addr_plus_one = _dut_uses_addr_plus_one(dut_text)
+
+    if off_by_one and addr_plus_one:
+        reasons.append("Mismatch pattern suggests off-by-one addressing and DUT source uses addr+1.")
+        return {"verdict": "DUT", "reasons": reasons}
+
+    if off_by_one and not addr_plus_one:
+        reasons.append("Mismatch pattern suggests off-by-one addressing, but DUT source does not show addr+1 usage.")
+        return {"verdict": "TB", "reasons": reasons}
+
+    return {"verdict": "INCONCLUSIVE", "reasons": []}
+
+
+def _auto_fix_read_timing(tb_text: str) -> Tuple[str, bool]:
+    """
+    Heuristic auto-fix: if do_read samples rdata directly and rvalid exists,
+    insert wait(rvalid) + one extra posedge before sampling.
+    """
+    if "rvalid" not in tb_text:
+        return tb_text, False
+    task_re = re.compile(r"(task\s+automatic\s+do_read\b.*?endtask)", re.S)
+    m = task_re.search(tb_text)
+    if not m:
+        return tb_text, False
+    task_block = m.group(1)
+    if "wait (rvalid)" in task_block or "wait(rvalid)" in task_block:
+        return tb_text, False
+    q_assign_re = re.compile(r"^\s*(\w+)\s*=\s*rdata\s*;\s*$", re.M)
+    if not q_assign_re.search(task_block):
+        return tb_text, False
+    def _repl(match: re.Match) -> str:
+        lhs = match.group(1)
+        return (
+            "  wait (rvalid);\n"
+            "  @(posedge clk);\n"
+            f"  {lhs} = rdata;"
+        )
+    task_block_new = q_assign_re.sub(_repl, task_block, count=1)
+    tb_new = tb_text.replace(task_block, task_block_new, 1)
+    return tb_new, True
+
+
+def llm_fix(provider, tb_text: str, spec_text: str, sim_out: str, spec_summary: str) -> List[Dict[str, str]]:
     user = (
         "SPEC:\n-----\n" + spec_text.strip() + "\n-----\n\n"
+        "SPEC_SUMMARY:\n-----\n" + spec_summary + "\n-----\n\n"
         "TESTBENCH:\n-----\n" + tb_text.strip() + "\n-----\n\n"
         "SIM OUTPUT:\n-----\n" + sim_out.strip() + "\n-----\n"
     )
@@ -232,9 +343,10 @@ def llm_fix(provider, tb_text: str, spec_text: str, sim_out: str) -> List[Dict[s
     return parse_edits(raw)
 
 
-def llm_check(provider, tb_text: str, spec_text: str, sim_out: str) -> Dict[str, Any]:
+def llm_check(provider, tb_text: str, spec_text: str, sim_out: str, spec_summary: str) -> Dict[str, Any]:
     user = (
         "SPEC:\n-----\n" + spec_text.strip() + "\n-----\n\n"
+        "SPEC_SUMMARY:\n-----\n" + spec_summary + "\n-----\n\n"
         "TESTBENCH:\n-----\n" + tb_text.strip() + "\n-----\n\n"
         "SIM OUTPUT:\n-----\n" + sim_out.strip() + "\n-----\n"
     )
@@ -244,21 +356,35 @@ def llm_check(provider, tb_text: str, spec_text: str, sim_out: str) -> Dict[str,
     js = _safe_json_load(_strip_any_fences(raw)) or {}
     verdict = str(js.get("verdict", "REJECT")).upper()
     reasons = js.get("reasons", [])
+    required = js.get("required_fixes", [])
     if verdict not in ("APPROVE", "REJECT"):
         verdict = "REJECT"
     if not isinstance(reasons, list):
         reasons = []
-    return {"verdict": verdict, "reasons": reasons}
+    if not isinstance(required, list):
+        required = []
+    return {"verdict": verdict, "reasons": reasons, "required_fixes": required}
 
 
 def sim_fix_loop(tb_path: Path, filelist: Path, spec_path: Path, failed_sim_log: Optional[Path],
                  max_iters: int) -> Tuple[bool, str]:
     provider = provider_from_env()
     spec_text = read(spec_path)
+    spec = parse_spec(spec_text)
+    addr_w = int(spec.get("addr_width", 0) or 0)
+    depth = int(spec.get("depth", 0) or 0)
+    if depth <= 0 and addr_w > 0:
+        depth = 1 << addr_w
+    host_if = str(spec.get("host_if", spec.get("protocol", "")) or "")
+    clk_mhz = (spec.get("sim", {}) or {}).get("clock_mhz", None)
+    spec_summary = (
+        f"addr_width={addr_w}, depth={depth}, host_if={host_if}, clock_mhz={clk_mhz}"
+    )
 
     fl_files = parse_filelist(filelist)
     dut_files = [p for p in fl_files if p.name not in {"tb_gen.sv", "auto_stub_dut.sv", "stub_dut.sv"}]
-    dut_text = load_sources(dut_files)
+    max_src_chars = int(os.getenv("TB_SIM_FIX_MAX_SOURCE_CHARS", "20000"))
+    dut_text = load_sources(dut_files, max_chars=max_src_chars)
 
     failed_log_text = read(failed_sim_log) if (failed_sim_log and failed_sim_log.exists()) else ""
 
@@ -271,7 +397,8 @@ def sim_fix_loop(tb_path: Path, filelist: Path, spec_path: Path, failed_sim_log:
         comp_code, comp_out = run_iverilog(filelist, exe_path)
         if comp_code != 0:
             print("[sim_fix] compile failed; attempting compile-fix loop...")
-            ok, msg = compile_fix_loop(tb_path, filelist, max_iters=3)
+            cf_max = int(os.getenv("TB_COMPILE_FIX_MAX_ITERS", "5"))
+            ok, msg = compile_fix_loop(tb_path, filelist, max_iters=cf_max)
             print(msg)
             if not ok:
                 return False, "[sim_fix] compile-fix failed; stopping."
@@ -284,11 +411,31 @@ def sim_fix_loop(tb_path: Path, filelist: Path, spec_path: Path, failed_sim_log:
             return True, "[sim_fix] simulation passed after fixes."
 
         tb_text = read(tb_path)
-        triage = llm_triage(provider, dut_text, tb_text, spec_text, sim_out, failed_log_text)
+        triage = llm_triage(provider, dut_text, tb_text, spec_text, sim_out, failed_log_text, spec_summary)
+        heur = heuristic_triage(dut_text, sim_out)
+        if heur.get("verdict") != "INCONCLUSIVE":
+            if triage.get("verdict") == "INCONCLUSIVE":
+                triage = heur
+            elif triage.get("verdict") == "TB" and heur.get("verdict") == "DUT":
+                triage = heur
+            elif triage.get("verdict") == "DUT" and heur.get("verdict") == "TB":
+                # conflicting signals; keep LLM verdict but append heuristic note
+                triage["reasons"] = list(triage.get("reasons", [])) + [
+                    "Heuristic triage suggests TB instead of DUT."
+                ]
         print(f"[sim_fix] triage verdict={triage.get('verdict')} reasons={'; '.join(triage.get('reasons', [])) or '(none)'}")
 
         if triage.get("verdict") == "DUT":
             return False, "[sim_fix] triage indicates DUT is bad; stopping auto-fix."
+
+        tb_text = read(tb_path)
+        tb_auto, auto_applied = _auto_fix_read_timing(tb_text)
+        if auto_applied:
+            tb_auto = icarus_fixups(tb_auto)
+            write(tb_path, tb_auto)
+            print("[sim_fix] auto-fix applied: add wait(rvalid) before sampling rdata.")
+            last_checker_reasons = []
+            continue
 
         # Feed back prior checker rejections to the fixer for better next edits.
         if last_checker_reasons:
@@ -300,17 +447,21 @@ def sim_fix_loop(tb_path: Path, filelist: Path, spec_path: Path, failed_sim_log:
         else:
             sim_out_with_feedback = sim_out
 
-        edits = llm_fix(provider, tb_text, spec_text, sim_out_with_feedback)
+        edits = llm_fix(provider, tb_text, spec_text, sim_out_with_feedback, spec_summary)
         if not edits:
             return False, "[sim_fix] LLM returned no TB edits; stopping."
 
         tb_new = apply_edits(tb_text, edits)
         tb_new = icarus_fixups(tb_new)
 
-        check = llm_check(provider, tb_new, spec_text, sim_out)
+        check = llm_check(provider, tb_new, spec_text, sim_out, spec_summary)
         print(f"[sim_fix] checker verdict={check.get('verdict')} reasons={'; '.join(check.get('reasons', [])) or '(none)'}")
         if check.get("verdict") != "APPROVE":
-            last_checker_reasons = list(check.get("reasons", [])) if isinstance(check.get("reasons", []), list) else []
+            reasons_list = list(check.get("reasons", [])) if isinstance(check.get("reasons", []), list) else []
+            required_list = list(check.get("required_fixes", [])) if isinstance(check.get("required_fixes", []), list) else []
+            merged = reasons_list + required_list
+            if merged:
+                last_checker_reasons = merged
             print("[sim_fix] checker rejected TB edits; retrying with feedback.")
             # Do not write rejected TB; continue to next iteration.
             continue
