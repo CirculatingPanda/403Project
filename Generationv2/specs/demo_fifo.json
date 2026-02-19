@@ -1,0 +1,27 @@
+{
+  "kind": "fifo_controller",
+  "name": "demo_fifo",
+  "description": "Simple 256-deep synchronous FIFO",
+  "clock_mhz": 100,
+  "reset": {
+    "active_low": true,
+    "sync": true
+  },
+  "host_if": {
+    "bus": "custom",
+    "data_bits": 32,
+    "addr_bits": 0,
+    "endian": "little"
+  },
+  "fifo": {
+    "depth": 256,
+    "data_bits": 32,
+    "iface": "ready_valid",
+    "almost_full_thresh": 224,
+    "almost_empty_thresh": 32
+  },
+  "behavior": {
+    "on_overflow": "stall_writer",
+    "on_underflow": "stall_reader"
+  }
+}

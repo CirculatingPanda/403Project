@@ -1,0 +1,27 @@
+{
+  "kind": "rom_controller",
+  "name": "boot_rom",
+  "description": "8KB boot ROM with 2-cycle latency for slower flash",
+  "clock_mhz": 100,
+  "reset": {
+    "active_low": true,
+    "sync": true
+  },
+  "host_if": {
+    "bus": "custom",
+    "data_bits": 32,
+    "addr_bits": 14,
+    "endian": "little"
+  },
+  "mem": {
+    "depth": 2048,
+    "data_bits": 32
+  },
+  "init": {
+    "type": "hex_file",
+    "source": "bootloader.hex"
+  },
+  "timing": {
+    "read_latency_cycles": 2
+  }
+}

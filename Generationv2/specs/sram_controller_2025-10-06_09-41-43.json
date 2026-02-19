@@ -1,0 +1,29 @@
+{
+  "kind": "sram_controller",
+  "name": "",
+  "description": "",
+  "clock_mhz": "default",
+  "reset": {
+    "active_low": true,
+    "sync": true
+  },
+  "host_if": {
+    "bus": "AXI4-Lite",
+    "data_bits": 32,
+    "addr_bits": 16,
+    "endian": "little"
+  },
+  "mem": {
+    "depth": 4096,
+    "data_bits": 32
+  },
+  "timing": {
+    "read_latency_cycles": 1
+  },
+  "write_enable_mask": false,
+  "chip_selects": 1,
+  "ecc": {
+    "enabled": false,
+    "scheme": "default"
+  }
+}

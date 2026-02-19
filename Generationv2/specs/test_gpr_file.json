@@ -1,0 +1,24 @@
+{
+  "kind": "regfile_controller",
+  "name": "gpr_file",
+  "description": "64x64-bit general purpose register file (RISC-V style)",
+  "clock_mhz": 250,
+  "reset": {
+    "active_low": true,
+    "sync": true
+  },
+  "host_if": {
+    "bus": "custom",
+    "data_bits": 64,
+    "addr_bits": 0,
+    "endian": "little"
+  },
+  "regfile": {
+    "entries": 64,
+    "data_bits": 64,
+    "read_ports": 2,
+    "write_ports": 1,
+    "bypass_on_same_cycle": false,
+    "hazard_policy": "stall"
+  }
+}
