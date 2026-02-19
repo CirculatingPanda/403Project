@@ -1,0 +1,385 @@
+JEDEC DDR2 INITIALIZATION SEQUENCE - COMPLETE REFERENCE
+========================================================
+
+This document provides the complete DDR2 initialization sequence per JESD79-2F.
+Target: Micron MT47H64M16 (1Gb, x16, DDR2-800)
+
+INITIALIZATION OVERVIEW
+=======================
+
+The initialization process takes approximately 200μs and consists of:
+1. Power-up and clock stabilization (200μs min)
+2. CKE assertion and wait periods
+3. Mode register programming sequence
+4. DLL calibration
+5. OCD impedance calibration
+
+STATE MACHINE SEQUENCE
+======================
+
+STATE 0: POWER_UP_INIT
+----------------------------
+Description: Initial power-up wait for voltage and clock stabilization
+Duration: 200,000 ns minimum (T_INIT = 200μs)
+Actions:
+  - Keep CKE = LOW during this entire period
+  - CS# = HIGH (deselect) or CS# = LOW with continuous NOP commands
+  - All other control signals can be don't care
+Timing: Wait for T_INIT cycles before proceeding
+Next State: ASSERT_CKE
+
+STATE 1: ASSERT_CKE
+----------------------------
+Description: Bring CKE high and wait for stability
+Duration: 400 ns minimum (T_XPR = max(5*tCK, tRFC+10ns))
+Actions:
+  - Set CKE = HIGH
+  - Issue NOP commands (CS# = LOW, RAS# = HIGH, CAS# = HIGH, WE# = HIGH)
+Timing: Wait for T_XPR cycles
+Next State: PRECHARGE_ALL_1
+
+STATE 2: PRECHARGE_ALL_1
+----------------------------
+Description: First precharge all banks command
+Duration: T_RP (min 12.5ns, varies by speed grade)
+Command Encoding:
+  - CS# = LOW
+  - RAS# = LOW
+  - CAS# = HIGH
+  - WE# = LOW
+  - A10 = HIGH (critical - signals all banks)
+  - BA[2:0] = don't care
+  - A[12:0] = don't care (except A10)
+Actions:
+  - Issue PRECHARGE ALL command by setting A10 = 1
+  - Wait T_RP cycles before next command
+Next State: LOAD_EMR2
+
+STATE 3: LOAD_EMR2
+----------------------------
+Description: Load Extended Mode Register 2
+Duration: T_MRD (2 cycles minimum)
+Command Encoding:
+  - CS# = LOW
+  - RAS# = LOW
+  - CAS# = LOW
+  - WE# = LOW
+  - BA[2:0] = 3'b010 (selects EMR2)
+Mode Register Settings (A[12:0]):
+  - A[12:11] = 2'b00 (Reserved, must be 0)
+  - A[10:7] = 4'b0000 (Reserved, must be 0)
+  - A[6:3] = 4'b0000 (Reserved, must be 0)
+  - A[2:0] = 3'b000 (Reserved, must be 0)
+Typical Value: BA=010, A[12:0] = 13'b0_0000_0000_0000
+Actions:
+  - Issue MODE REGISTER SET command with BA=010
+  - Set all address bits to 0 (reserved fields)
+  - Wait T_MRD cycles
+Next State: LOAD_EMR3
+
+STATE 4: LOAD_EMR3
+----------------------------
+Description: Load Extended Mode Register 3
+Duration: T_MRD (2 cycles minimum)
+Command Encoding:
+  - CS# = LOW, RAS# = LOW, CAS# = LOW, WE# = LOW
+  - BA[2:0] = 3'b011 (selects EMR3)
+Mode Register Settings (A[12:0]):
+  - A[12:0] = 13'b0_0000_0000_0000 (all reserved, set to 0)
+Typical Value: BA=011, A[12:0] = 13'b0_0000_0000_0000
+Actions:
+  - Issue MODE REGISTER SET command with BA=011
+  - Set all address bits to 0
+  - Wait T_MRD cycles
+Next State: LOAD_EMR1_DLL_ENABLE
+
+STATE 5: LOAD_EMR1_DLL_ENABLE
+----------------------------
+Description: Load Extended Mode Register 1 with DLL enabled
+Duration: T_MRD (2 cycles minimum)
+Command Encoding:
+  - CS# = LOW, RAS# = LOW, CAS# = LOW, WE# = LOW
+  - BA[2:0] = 3'b001 (selects EMR1)
+Mode Register Settings (A[12:0]):
+  - A0 = 0 (DLL Enable)
+  - A1 = 0 (Output Driver Impedance: Full strength)
+  - A2 = 0 (ODT: Disabled for single rank)
+  - A5:A3 = 3'b000 (Additive Latency: 0)
+  - A6 = 0 (Output Buffer: Enabled)
+  - A9:A7 = 3'b000 (OCD Calibration: Exit/default)
+  - A10 = 0 (RDQS: Disabled for x16)
+  - A11 = 0 (DQS#: Enabled)
+  - A12 = 0 (Output: Enabled)
+Typical Value: BA=001, A[12:0] = 13'b0_0_0_000_0_000_0_0_0
+ODT Settings (A2 for single rank):
+  - Single rank: A2 = 0 (ODT disabled)
+  - If dual rank: A2 = 1 (ODT enabled, 75Ω typical)
+Actions:
+  - Issue MODE REGISTER SET with BA=001
+  - Wait T_MRD cycles
+Next State: LOAD_MR_DLL_RESET
+
+STATE 6: LOAD_MR_DLL_RESET
+----------------------------
+Description: Load Mode Register with DLL reset
+Duration: T_MRD (2 cycles minimum)
+Command Encoding:
+  - CS# = LOW, RAS# = LOW, CAS# = LOW, WE# = LOW
+  - BA[2:0] = 3'b000 (selects MR)
+Mode Register Settings (A[12:0]):
+  - A[2:0] = Burst Length
+    * 3'b010 = BL 4 (recommended for high frequency)
+    * 3'b011 = BL 8
+  - A3 = 0 (Burst Type: Sequential)
+  - A[6:4] = CAS Latency (CL)
+    * For DDR2-800 (400 MHz): typically CL=5 → 3'b101
+    * For DDR2-667 (333 MHz): typically CL=4 → 3'b100
+    * For DDR2-533 (267 MHz): typically CL=4 → 3'b100
+  - A7 = 0 (Test Mode: Normal operation)
+  - A8 = 1 (DLL Reset: Yes - critical for this step)
+  - A11:A9 = Write Recovery (WR) / Read-to-Precharge (RTP)
+    * Encoding depends on speed grade
+    * Example: For tWR=15ns @ 5ns tCK: 3 cycles → encoding varies by spec
+  - A12 = 0 (Power Down: Fast exit)
+
+Example for DDR2-800, CL=5, BL=4:
+  BA=000, A[12:0] = 13'b0_010_1_0_101_0_010
+  (A12=0, A11:9=010 for WR, A8=1 for DLL reset, A7=0, A6:4=101 for CL5, A3=0, A2:0=010 for BL4)
+
+Actions:
+  - Issue MODE REGISTER SET with BA=000 and A8=1 (DLL reset)
+  - Wait T_MRD cycles
+Next State: PRECHARGE_ALL_2
+
+STATE 7: PRECHARGE_ALL_2
+----------------------------
+Description: Second precharge all banks (after DLL reset)
+Duration: T_RP (min 12.5ns)
+Command Encoding: Same as STATE 2
+  - CS# = LOW, RAS# = LOW, CAS# = HIGH, WE# = LOW
+  - A10 = HIGH (precharge all banks)
+Actions:
+  - Issue PRECHARGE ALL command
+  - Wait T_RP cycles
+Next State: AUTO_REFRESH_1
+
+STATE 8: AUTO_REFRESH_1
+----------------------------
+Description: First auto-refresh command
+Duration: T_RFC (min 75ns for 1Gb, 127.5ns for 2Gb)
+Command Encoding:
+  - CS# = LOW
+  - RAS# = LOW
+  - CAS# = LOW
+  - WE# = HIGH
+  - BA[2:0] = don't care
+  - A[12:0] = don't care
+Actions:
+  - Issue AUTO REFRESH command
+  - Wait T_RFC cycles (critical - must complete refresh)
+Next State: AUTO_REFRESH_2
+
+STATE 9: AUTO_REFRESH_2
+----------------------------
+Description: Second auto-refresh command
+Duration: T_RFC (same as AUTO_REFRESH_1)
+Command Encoding: Same as STATE 8
+Actions:
+  - Issue AUTO REFRESH command
+  - Wait T_RFC cycles
+  - At least 2 AUTO REFRESH commands required; some designs use more
+Next State: LOAD_MR_DLL_CLEAR
+
+STATE 10: LOAD_MR_DLL_CLEAR
+----------------------------
+Description: Load Mode Register with DLL reset cleared
+Duration: T_MRD (2 cycles minimum)
+Command Encoding:
+  - CS# = LOW, RAS# = LOW, CAS# = LOW, WE# = LOW
+  - BA[2:0] = 3'b000
+Mode Register Settings:
+  - Same as STATE 6, but A8 = 0 (DLL not in reset)
+  - All other fields identical to STATE 6
+
+Example for DDR2-800, CL=5, BL=4:
+  BA=000, A[12:0] = 13'b0_010_0_0_101_0_010
+  (Note: A8=0 now, was 1 in STATE 6)
+
+Actions:
+  - Issue MODE REGISTER SET with A8=0
+  - Wait T_MRD cycles
+Next State: WAIT_DLL_LOCK
+
+STATE 11: WAIT_DLL_LOCK
+----------------------------
+Description: Wait for DLL to lock
+Duration: 200 cycles minimum (per JEDEC)
+Actions:
+  - Issue NOP commands continuously
+  - Some implementations wait longer (256 or 512 cycles) for safety
+  - No other activity during this period
+Timing: Wait at least 200 cycles
+Next State: LOAD_EMR1_OCD_DEFAULT
+
+STATE 12: LOAD_EMR1_OCD_DEFAULT
+----------------------------
+Description: Set OCD impedance calibration to default
+Duration: T_MOD (min 12ns)
+Command Encoding:
+  - CS# = LOW, RAS# = LOW, CAS# = LOW, WE# = LOW
+  - BA[2:0] = 3'b001
+Mode Register Settings:
+  - Same as STATE 5, except:
+  - A[9:7] = 3'b111 (OCD Calibration: Default)
+  - All other bits same as EMR1 from STATE 5
+
+Example: BA=001, A[12:0] = 13'b0_0_0_111_0_000_0_0_0
+  (A9:7=111 for OCD default, rest same as before)
+
+Actions:
+  - Issue MODE REGISTER SET with A9:7 = 111
+  - Wait T_MOD cycles (12ns min)
+Next State: LOAD_EMR1_OCD_EXIT
+
+STATE 13: LOAD_EMR1_OCD_EXIT
+----------------------------
+Description: Exit OCD calibration mode
+Duration: T_MOD (min 12ns)
+Command Encoding:
+  - CS# = LOW, RAS# = LOW, CAS# = LOW, WE# = LOW
+  - BA[2:0] = 3'b001
+Mode Register Settings:
+  - Same as STATE 5: A[9:7] = 3'b000 (OCD Exit)
+  - All other bits identical to STATE 5
+
+Example: BA=001, A[12:0] = 13'b0_0_0_000_0_000_0_0_0
+
+Actions:
+  - Issue MODE REGISTER SET with A9:7 = 000
+  - Wait T_MOD cycles
+Next State: INIT_COMPLETE
+
+STATE 14: INIT_COMPLETE
+----------------------------
+Description: Initialization complete, ready for normal operation
+Actions:
+  - Assert init_done signal
+  - Controller may now accept read/write commands
+  - Begin periodic refresh operations
+  - Transition to operational state machine
+
+
+COMMAND ENCODINGS SUMMARY
+==========================
+
+NOP:
+  CS# = LOW, RAS# = HIGH, CAS# = HIGH, WE# = HIGH
+
+PRECHARGE:
+  CS# = LOW, RAS# = LOW, CAS# = HIGH, WE# = LOW
+  A10 = 1 for all banks, A10 = 0 for single bank (with bank in BA)
+
+AUTO REFRESH:
+  CS# = LOW, RAS# = LOW, CAS# = LOW, WE# = HIGH
+
+MODE REGISTER SET:
+  CS# = LOW, RAS# = LOW, CAS# = LOW, WE# = LOW
+  BA[2:0] selects which register (00=MR, 01=EMR1, 10=EMR2, 11=EMR3)
+  A[12:0] contains mode settings
+
+
+CRITICAL TIMING PARAMETERS
+===========================
+
+For DDR2-800 (400 MHz, 5ns cycle time):
+  T_INIT = 200,000 ns = 40,000 cycles
+  T_RP = 12.5 ns = 3 cycles (round up from 2.5)
+  T_RFC = 127.5 ns = 26 cycles (for 1Gb density)
+  T_MRD = 2 cycles
+  T_MOD = 12 ns = 3 cycles (round up from 2.4)
+  T_XPR = max(5*tCK, T_RFC+10ns) = max(25ns, 137.5ns) = 137.5ns = 28 cycles
+
+For DDR2-667 (333 MHz, 6ns cycle time):
+  T_INIT = 200,000 ns = 33,334 cycles
+  T_RP = 12.5 ns = 3 cycles (round up from 2.08)
+  T_RFC = 127.5 ns = 22 cycles (round up from 21.25)
+  T_MRD = 2 cycles
+  T_MOD = 12 ns = 2 cycles
+  T_XPR = max(5*tCK, T_RFC+10ns) = max(30ns, 137.5ns) = 137.5ns = 23 cycles
+
+
+MODE REGISTER QUICK REFERENCE
+==============================
+
+MR (BA=00):
+  A2:A0   = Burst Length (010=4, 011=8)
+  A3      = Burst Type (0=sequential, 1=interleaved)
+  A6:A4   = CAS Latency (see JEDEC spec for encoding)
+  A7      = Test Mode (0=normal, 1=test)
+  A8      = DLL Reset (1=reset, 0=normal)
+  A11:A9  = Write Recovery and Read-to-Precharge
+  A12     = Power Down Mode (0=fast exit, 1=slow exit)
+
+EMR1 (BA=01):
+  A0      = DLL Enable (0=enable, 1=disable)
+  A1      = Output Driver Impedance
+  A2      = ODT (Rtt) - depends on board topology
+  A5:A3   = Additive Latency
+  A6      = Output Buffer (0=enabled, 1=disabled)
+  A9:A7   = OCD Calibration (000=exit, 111=default)
+  A10     = DQS# Enable (0=enable, 1=disable)
+  A11     = RDQS Enable (for x8 only)
+  A12     = Output Enable (0=enabled, 1=disabled)
+
+EMR2 (BA=10): All bits typically 0 (reserved)
+
+EMR3 (BA=11): All bits typically 0 (reserved)
+
+
+VERILOG STATE MACHINE EXAMPLE
+==============================
+
+localparam [4:0]
+  ST_POWER_UP           = 5'd0,
+  ST_ASSERT_CKE         = 5'd1,
+  ST_PRECHARGE_ALL_1    = 5'd2,
+  ST_LOAD_EMR2          = 5'd3,
+  ST_LOAD_EMR3          = 5'd4,
+  ST_LOAD_EMR1_ENABLE   = 5'd5,
+  ST_LOAD_MR_RESET      = 5'd6,
+  ST_PRECHARGE_ALL_2    = 5'd7,
+  ST_AUTO_REFRESH_1     = 5'd8,
+  ST_AUTO_REFRESH_2     = 5'd9,
+  ST_LOAD_MR_CLEAR      = 5'd10,
+  ST_WAIT_DLL_LOCK      = 5'd11,
+  ST_LOAD_EMR1_OCD_DEF  = 5'd12,
+  ST_LOAD_EMR1_OCD_EXIT = 5'd13,
+  ST_INIT_COMPLETE      = 5'd14;
+
+
+COMMON MISTAKES TO AVOID
+=========================
+
+1. Skipping wait periods - every state needs proper timing
+2. Wrong A10 value during precharge (must be 1 for precharge all)
+3. Wrong BA values when loading mode registers
+4. Forgetting to set A8=1 then A8=0 for DLL reset sequence
+5. Not waiting long enough for DLL lock (200 cycles minimum)
+6. Skipping OCD calibration sequence (states 12-13)
+7. Using T_MRD for T_MOD waits (T_MOD is longer)
+8. Not implementing T_INIT correctly (200μs is a long time!)
+
+
+VERIFICATION CHECKLIST
+======================
+
+□ Power-up wait is at least 200μs
+□ CKE transitions properly
+□ All mode register commands use correct BA values
+□ A10 set high for precharge all commands
+□ DLL reset sequence: A8=1 then A8=0
+□ At least 2 auto-refresh commands issued
+□ DLL lock wait is at least 200 cycles
+□ OCD calibration default then exit sequence
+□ All timing parameters met (T_RP, T_RFC, T_MRD, T_MOD)
+□ init_complete asserts at end of sequence
