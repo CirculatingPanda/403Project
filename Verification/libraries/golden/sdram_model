@@ -26,7 +26,8 @@ module sdram_model #(
   parameter int T_RAS_CYC = 5,   // ACT -> PRE min
   parameter int T_RC_CYC  = 8,   // ACT -> ACT same bank
   parameter int T_RFC_CYC = 8,   // REFRESH duration
-  parameter int T_WR_CYC  = 2    // WRITE recovery before PRE
+  parameter int T_WR_CYC  = 2,   // WRITE recovery before PRE
+  parameter bit INIT_MEM_ZERO = 1'b1
 ) (
   input  logic                   clk,
   input  logic                   rstn,
@@ -125,6 +126,14 @@ module sdram_model #(
   } rd_pend_t;
 
   rd_pend_t rdq;
+  typedef struct packed {
+    logic              active;
+    logic [BANK_W-1:0] b;
+    logic [ROW_W-1:0]  r;
+    logic [COL_W-1:0]  c;
+    int                beats_left;
+  } wr_pend_t;
+  wr_pend_t wrq;
 
   // Drive dq_in only when serving a read beat.
   always_ff @(posedge clk or negedge rstn) begin
@@ -156,6 +165,11 @@ module sdram_model #(
     if (!rstn) begin
       cycle <= 0;
       t_rfc <= 0;
+      if (INIT_MEM_ZERO) begin
+        for (int mi=0; mi<MEM_DEPTH; mi++) begin
+          mem[mi] <= '0;
+        end
+      end
       for (int b=0; b<(1<<BANK_W); b++) begin
         bank[b].st      <= BK_IDLE;
         bank[b].open_row<= '0;
@@ -165,6 +179,7 @@ module sdram_model #(
         bank[b].t_wr    <= 0;
       end
       rdq <= '{valid:0, delay:0, b:'0, r:'0, c:'0, beats_left:0};
+      wrq <= '{active:0, b:'0, r:'0, c:'0, beats_left:0};
     end else if (cke) begin
       cycle <= cycle + 1;
 
@@ -175,6 +190,22 @@ module sdram_model #(
         if (bank[b].t_ras > 0) bank[b].t_ras <= bank[b].t_ras - 1;
         if (bank[b].t_rp  > 0) bank[b].t_rp  <= bank[b].t_rp  - 1;
         if (bank[b].t_wr  > 0) bank[b].t_wr  <= bank[b].t_wr  - 1;
+      end
+      if (wrq.active) begin
+        if (dq_oe) begin
+          addr_t a; a.bank = wrq.b; a.row = wrq.r; a.col = wrq.c;
+          logic [DATA_W-1:0] cur = mem[idx(a)];
+          logic [DATA_W-1:0] nxt = dq_out;
+          for (int by=0; by<BE_W; by++) begin
+            if (dqm[by]) nxt[8*by +: 8] = cur[8*by +: 8];
+          end
+          mem[idx(a)] = nxt;
+        end else begin
+          $warning("[sdram_model] dq_oe deasserted during WRITE burst");
+        end
+        wrq.c = wrq.c + 1'b1;
+        wrq.beats_left = wrq.beats_left - 1;
+        if (wrq.beats_left == 1) wrq.active = 1'b0;
       end
 
       // Decode command on this cycle
@@ -251,30 +282,8 @@ module sdram_model #(
           end else if (bank[b].t_rcd > 0) begin
             $warning("[sdram_model] Violated tRCD on WRITE (bank=%0d)", b);
           end
-          // Capture BL beats starting *this* cycle while controller asserts dq_oe.
-          // We mask bytes using DQM (1=mask/ignore).
-          for (int beat=0; beat<BL; beat++) begin
-            automatic int beat_idx = beat;
-            // Capture on subsequent cycles
-            fork
-              begin
-                @(posedge clk);
-                for (int i=0; i<beat_idx; i++) @(posedge clk);
-                if (dq_oe) begin
-                  addr_t a; a.bank = ba; a.row = a_row; a.col = a_col + beat_idx[COL_W-1:0];
-                  logic [DATA_W-1:0] cur = mem[idx(a)];
-                  logic [DATA_W-1:0] nxt = dq_out;
-                  // Apply DQM: 1=mask (keep cur byte)
-                  for (int by=0; by<BE_W; by++) begin
-                    if (dqm[by]) nxt[8*by +: 8] = cur[8*by +: 8];
-                  end
-                  mem[idx(a)] = nxt;
-                end else begin
-                  $warning("[sdram_model] dq_oe deasserted during WRITE burst beat=%0d", beat_idx);
-                end
-              end
-            join_none
-          end
+          // Start write capture on subsequent cycles.
+          wrq <= '{active:1, b:ba, r:a_row, c:a_col, beats_left:BL};
           bank[b].t_wr <= T_WR_CYC; // need write recovery before PRE
         end
 

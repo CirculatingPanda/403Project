@@ -168,15 +168,20 @@ def ai_check(tb_text: str,
              provider: TamusAdapter,
              allowed_regions: Optional[List[str]] = None) -> Tuple[str, List[str], List[Dict[str, str]]]:
     scope_hint = ""
+    tb_for_check = tb_text
     if allowed_regions:
         scope_hint = (
             "Scope restriction: ONLY review and propose edits within these @LLM_EDIT regions: "
             f"{', '.join(allowed_regions)}. Ignore issues outside these regions.\n\n"
         )
+        engine = GuardedEditEngine(provider=EchoAdapter(model="echo"))
+        regions = engine._find_regions(tb_text)  # type: ignore[attr-defined]
+        want = {str(n).strip() for n in allowed_regions}
+        tb_for_check = "\n".join([r.original_text for r in regions if r.name in want])
     user_prompt = f"""{scope_hint}Review the following SystemVerilog testbench for compilation readiness:
 
 ---BEGIN_TB---
-{tb_text}
+{tb_for_check}
 ---END_TB---
 
 Remember: return STRICT JSON only per the schema."""
@@ -312,6 +317,25 @@ def _region_has_non_comment_content(tb_text: str, region_name: str) -> bool:
             cleaned = _strip_sv_comments(r.original_text)
             return bool(cleaned.strip())
     return True
+
+
+def _fix_rstn_aliases_in_regions(tb_text: str, allowed_regions: Optional[List[str]]) -> str:
+    """
+    If a slice uses rst_n instead of rstn, fix it inside allowed regions only.
+    """
+    if not allowed_regions:
+        return tb_text
+    engine = GuardedEditEngine(provider=EchoAdapter(model="echo"))
+    regions = engine._find_regions(tb_text)  # type: ignore[attr-defined]
+    want = {str(n).strip() for n in allowed_regions}
+    out = tb_text
+    for r in regions:
+        if r.name not in want:
+            continue
+        if "rst_n" in r.original_text:
+            fixed = r.original_text.replace("rst_n", "rstn")
+            out = out.replace(r.original_text, fixed, 1)
+    return out
 
 def run_tb_engineer(template_text: str, spec: dict, engineer_model: str) -> str:
     return apply_edits_with_provider(
@@ -450,6 +474,8 @@ def run_checker_loop(initial_tb: str,
             return tb, {"iterations": i, "history": history, "approved": True}
 
         if edits:
+            # Pre-fix common alias errors inside allowed regions before applying edits.
+            tb = _fix_rstn_aliases_in_regions(tb, allowed_regions)
             tb_before = tb
             tb_after, applied = apply_edits(tb, edits)
             if _changes_outside_allowed(tb_before, tb_after, allowed_regions):
@@ -462,6 +488,8 @@ def run_checker_loop(initial_tb: str,
                 if soft_stop_count < soft_stop_max:
                     soft_stop_count += 1
                     last_reason_sig = None
+                    # Discard out-of-slice edits and continue with prior TB.
+                    tb = tb_before
                     continue
                 return tb_before, {
                     "iterations": i,

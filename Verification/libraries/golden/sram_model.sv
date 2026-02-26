@@ -7,7 +7,8 @@
 
 module sram_model #(
   parameter int DATA_W = 16,
-  parameter int ADDR_W = 18
+  parameter int ADDR_W = 18,
+  parameter bit INIT_MEM_ZERO = 1'b1
 ) (
   input  logic                  clk,    // used to sequence writes cleanly
   input  logic                  rstn,
@@ -27,15 +28,14 @@ module sram_model #(
   // Memory array
   logic [DATA_W-1:0] mem [0:(1<<ADDR_W)-1];
 
-  // Optional: clear memory on reset (cheap, for small ADDR_W; comment out if huge)
-  // generate
-  //   if (ADDR_W <= 12) begin : g_small_init
-  //     integer i;
-  //     always_ff @(negedge rstn) begin
-  //       for (i = 0; i < (1<<ADDR_W); i++) mem[i] <= '0;
-  //     end
-  //   end
-  // endgenerate
+  // Optional init to zero (set INIT_MEM_ZERO=0 to skip)
+  initial begin
+    if (INIT_MEM_ZERO) begin
+      for (int i = 0; i < (1<<ADDR_W); i++) begin
+        mem[i] = '0;
+      end
+    end
+  end
 
   // ----------------------------
   // Write behavior (masked by byte enables)

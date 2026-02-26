@@ -34,7 +34,9 @@ module ddr2_model #(
   parameter int T_RTP_CYC = 2,
   // On-die termination windows around writes (approx)
   parameter int T_ODT_ON_CYC  = 1,
-  parameter int T_ODT_OFF_CYC = 1
+  parameter int T_ODT_OFF_CYC = 1,
+  // Memory init
+  parameter bit INIT_MEM_ZERO = 1'b1
 ) (
   input  logic                   ck,
   input  logic                   rstn,
@@ -106,6 +108,15 @@ module ddr2_model #(
     int                beats_left;    // in beats
   } rdq_t;
   rdq_t rdq;
+  // ---------------- WRITE scheduler ----------------
+  typedef struct {
+    logic              active;
+    logic [BANK_W-1:0] b;
+    logic [ROW_W-1:0]  r;
+    logic [COL_W-1:0]  c;
+    int                beats_left;
+  } wrq_t;
+  wrq_t wrq;
 
   task automatic drive_read_beat();
     addr_t a; a.b = rdq.b; a.r = rdq.r; a.c = rdq.c;
@@ -116,7 +127,7 @@ module ddr2_model #(
     if (rdq.beats_left == 1) rdq.valid <= 1'b0;
   endtask
 
-  // Track a simple “recent write” window for ODT checking
+  // Track a simple "recent write" window for ODT checking
   int odt_guard; // counts down around writes
 
   // ---------------- CK domain ----------------
@@ -125,12 +136,18 @@ module ddr2_model #(
       dq_in <= '0; dqs_in <= 1'b0;
       t_rfc <= 0; t_rrd_cool <= 0; t_ccd_cool <= 0;
       odt_guard <= 0;
+      if (INIT_MEM_ZERO) begin
+        for (int mi=0; mi<MEM_DEPTH; mi++) begin
+          mem[mi] <= '0;
+        end
+      end
       for (int i=0;i<(1<<BANK_W);i++) begin
         bank[i].st <= BK_IDLE;
         bank[i].open_row <= '0;
         bank[i].t_rcd <= 0; bank[i].t_ras <= 0; bank[i].t_rp <= 0; bank[i].t_wr <= 0;
       end
       rdq <= '{valid:0, delay_ck:0, b:'0, r:'0, c:'0, beats_left:0};
+      wrq <= '{active:0, b:'0, r:'0, c:'0, beats_left:0};
     end else if (cke) begin
       if (t_rfc>0)      t_rfc      <= t_rfc - 1;
       if (t_rrd_cool>0) t_rrd_cool <= t_rrd_cool - 1;
@@ -148,6 +165,9 @@ module ddr2_model #(
       if (rdq.valid) begin
         if (rdq.delay_ck > 0) rdq.delay_ck <= rdq.delay_ck - 1;
         else                  drive_read_beat();
+      end else begin
+        dq_in  <= '0;
+        dqs_in <= 1'b0;
       end
 
       // Decode this cycle's command
@@ -204,6 +224,8 @@ module ddr2_model #(
           // Arm write recovery; and require ODT around the burst.
           bank[b].t_wr <= T_WR_CYC;
           t_ccd_cool   <= T_CCD_CYC;
+          // Latch write address for burst
+          wrq <= '{active:1, b:ba, r:a_row, c:a_col, beats_left:BL};
           // ODT guard window (before & after DQS burst)
           odt_guard    <= (T_ODT_ON_CYC + T_ODT_OFF_CYC + (BL+1)/BEATS_PER_CK);
         end
@@ -217,15 +239,17 @@ module ddr2_model #(
   // We check ODT roughly: it must be asserted during the guarded window.
   task automatic capture_write_beat();
     if (!odt) $warning("[ddr2_model] ODT deasserted during write beat");
-    addr_t a; a.b = ba; a.r = a_row; a.c = a_col;
-    static int beat_idx = 0;
-    a.c = a.c + beat_idx[COL_W-1:0];
+    if (!wrq.active) begin
+      return;
+    end
+    addr_t a; a.b = wrq.b; a.r = wrq.r; a.c = wrq.c;
     logic [DATA_W-1:0] cur = mem[idx(a)];
     logic [DATA_W-1:0] nxt = dq_out;
     for (int by=0; by<BE_W; by++) if (dqm[by]) nxt[8*by +: 8] = cur[8*by +: 8];
     mem[idx(a)] = nxt;
-    beat_idx++;
-    if (beat_idx >= BL) beat_idx = 0;
+    wrq.c = wrq.c + 1'b1;
+    wrq.beats_left = wrq.beats_left - 1;
+    if (wrq.beats_left == 1) wrq.active = 1'b0;
   endtask
 
   // Sample on both DQS edges when controller owns the bus.

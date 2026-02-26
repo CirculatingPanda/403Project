@@ -1,6 +1,5 @@
 # chat.py — Front-end console + Qt GUI chat for TAMU AI Chat API
 from pathlib import Path
-from PySide6.QtWidgets import QFileDialog
 import os, sys, json, copy, re
 from difflib import SequenceMatcher
 from typing import List, Dict
@@ -26,6 +25,7 @@ try:
         QPushButton,
         QLabel,
         QProgressBar,
+        QFileDialog,
     )
     from PySide6.QtCore import Qt
     QT_AVAILABLE = True
@@ -69,6 +69,7 @@ SYSTEM_MSG = (
     "• If the user types 'default' and a default exists, use that concrete value and emit it in UPDATE_JSON (never the literal string 'default').\n"
     "• After the user answers, acknowledge exactly with '✅ Set <field> to <value>.' then on a new line emit:\n"
     '  UPDATE_JSON={\"path\":\"<field.path>\",\"value\":<json_value>}\n'
+    "• The <field.path> MUST be the canonical dotted path (e.g., reset.sync, host_if.endian), not a friendly label.\n"
     "• When every required field is filled, present the compact final JSON specification and note where it was saved."
 )
 
@@ -134,6 +135,28 @@ def normalize_path(path: str | None) -> str | None:
     if path is None:
         return None
     p = path.strip()
+    # Map friendly label back to canonical path if possible
+    try:
+        if p in FRIENDLY_TO_CANON:
+            return FRIENDLY_TO_CANON[p]
+        pl = p.lower()
+        if pl in FRIENDLY_TO_CANON:
+            return FRIENDLY_TO_CANON[pl]
+    except Exception:
+        pass
+    # Common aliases the model sometimes emits
+    alias = {
+        "reset.synchronous": "reset.sync",
+        "reset_sync": "reset.sync",
+        "reset synchronous": "reset.sync",
+        "host endianness": "host_if.endian",
+        "host_if.endianness": "host_if.endian",
+    }
+    if p in alias:
+        return alias[p]
+    pl = p.lower()
+    if pl in alias:
+        return alias[pl]
     while p.startswith("/"):
         p = p[1:]
     p = p.replace("/", ".")
@@ -160,11 +183,15 @@ FIELD_TYPE = {
     "behavior.on_underflow": "word",
     "init.type": "word",
     "init.source": "word",
+    "sram.read_mode": "word",
+    "sram.write_mode": "word",
 
     # booleans
     "ecc.enabled": "boolean",
     "write_enable_mask": "boolean",
     "regfile.bypass_on_same_cycle": "boolean",
+    "fifo.fwft": "boolean",
+    "init.required": "boolean",
 
     # numbers
     "host_if.data_bits": "number",
@@ -175,6 +202,7 @@ FIELD_TYPE = {
     "clock_mhz": "number",
     "dram.row_bits": "number",
     "dram.col_bits": "number",
+    "dram.bank_bits": "number",
     "dram.burst_len": "number",
     "timing.tRCD": "number",
     "timing.tCL": "number",
@@ -192,6 +220,10 @@ FIELD_TYPE = {
     "regfile.write_ports": "number",
     "fifo.data_bits": "number",
     "fifo.depth": "number",
+    "sram.setup_cycles": "number",
+    "sram.hold_cycles": "number",
+    "sram.gap_cycles": "number",
+    "byte_enable_granularity": "number",
     "fifo.almost_full_thresh": "number",
     "fifo.almost_empty_thresh": "number",
 }
@@ -330,6 +362,8 @@ FRIENDLY_OVERRIDES = {
     "conflicts.same_address": "same-address conflict policy",
 }
 FRIENDLY_NAMES.update(FRIENDLY_OVERRIDES)
+FRIENDLY_TO_CANON = {v: k for k, v in FRIENDLY_NAMES.items()}
+FRIENDLY_TO_CANON.update({v.lower(): k for k, v in FRIENDLY_NAMES.items()})
 
 def pretty_field(path: str) -> str:
     """Human-readable field name for logs / UI."""
@@ -341,6 +375,9 @@ def describe_field(path: str) -> str:
 
 def user_label_for_path(path: str) -> str:
     return pretty_field(path)
+
+def canon_with_friendly(path: str) -> str:
+    return f"{path} ({describe_field(path)})"
 
 def rewrite_user_visible_paths(text: str) -> str:
     """
@@ -989,10 +1026,10 @@ class SpecEngine:
 
                 guidance = (
                     f"Current kind: {self.current_kind}\n"
-                    f"Confirm field: {describe_field(ack_field)}\n"
+                    f"Confirm field: {canon_with_friendly(ack_field)}\n"
                     "The user just answered this field.\n"
                     "Say exactly '✅ Set <field> to <value>.' before anything else.\n"
-                    "Immediately output UPDATE_JSON with that value on the next line.\n"
+                    f"Immediately output UPDATE_JSON with that value on the next line (use path '{ack_field}').\n"
                     f"{follow_line}"
                 )
 
@@ -1000,7 +1037,7 @@ class SpecEngine:
                 default_line = make_prompt_line(self.current_kind, missing)
                 guidance = (
                     f"Current kind: {self.current_kind}\n"
-                    f"Ask for field: {missing}\n"
+                    f"Ask for field: {canon_with_friendly(missing)}\n"
                     "Before you show the '🧩 Next field' line, first give 1–3 short sentences "
                     "explaining what this field represents in the FIFO/DRAM/memory-controller context "
                     "and why it matters for hardware behavior.\n"

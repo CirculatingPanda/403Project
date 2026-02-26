@@ -28,7 +28,8 @@ module ddr_model #(
   parameter int T_WTR_CYC = 2,
   parameter int T_RTW_CYC = 2,
   parameter int T_RFC_CYC = 10,
-  parameter int T_CCD_CYC = 2   // col-to-col cmd spacing
+  parameter int T_CCD_CYC = 2,  // col-to-col cmd spacing
+  parameter bit INIT_MEM_ZERO = 1'b1
 ) (
   input  logic                   ck,
   input  logic                   rstn,
@@ -102,6 +103,15 @@ module ddr_model #(
     int                beats_left;     // in beats (not CKs)
   } rdq_t;
   rdq_t rdq;
+  // ---------------- WRITE scheduler ----------------
+  typedef struct {
+    logic              active;
+    logic [BANK_W-1:0] b;
+    logic [ROW_W-1:0]  r;
+    logic [COL_W-1:0]  c;
+    int                beats_left;
+  } wrq_t;
+  wrq_t wrq;
 
   // Drive DQS/DQ during read bursts (simple square DQS toggling)
   task automatic drive_read_beat();
@@ -119,12 +129,18 @@ module ddr_model #(
       dq_in   <= '0;
       dqs_in  <= 1'b0;
       t_rfc   <= 0; t_rrd_cool <= 0; t_ccd_cool <= 0;
+      if (INIT_MEM_ZERO) begin
+        for (int mi=0; mi<MEM_DEPTH; mi++) begin
+          mem[mi] <= '0;
+        end
+      end
       for (int i=0;i<(1<<BANK_W);i++) begin
         bank[i].st <= BK_IDLE;
         bank[i].open_row <= '0;
         bank[i].t_rcd <= 0; bank[i].t_ras <= 0; bank[i].t_rp <= 0; bank[i].t_wr <= 0;
       end
       rdq <= '{valid:0, delay_ck:0, b:'0, r:'0, c:'0, beats_left:0};
+      wrq <= '{active:0, b:'0, r:'0, c:'0, beats_left:0};
     end else if (cke) begin
       // cool-downs
       if (t_rfc>0)      t_rfc      <= t_rfc - 1;
@@ -145,6 +161,9 @@ module ddr_model #(
           // produce 2 beats per CK edge domain (one here, one on negedge block)
           drive_read_beat();
         end
+      end else begin
+        dq_in  <= '0;
+        dqs_in <= 1'b0;
       end
 
       // Decode command
@@ -209,6 +228,8 @@ module ddr_model #(
           // in negedge/posedge DQS sampling). Arm tWR before PRE.
           bank[b].t_wr <= T_WR_CYC;
           t_ccd_cool   <= T_CCD_CYC;
+          // Latch write address for burst
+          wrq <= '{active:1, b:ba, r:a_row, c:a_col, beats_left:BL};
         end
 
         default: ;
@@ -220,16 +241,18 @@ module ddr_model #(
   // Capture one beat per DQS edge while controller owns the bus (dq_oe & dqs_oe).
   // We assume the controller asserts a WRITE command before starting DQS toggles.
   task automatic capture_write_beat();
-    addr_t a; a.b = ba; a.r = a_row; a.c = a_col; // current column at cmd time
-    static int beat_idx = 0;                      // track within burst
-    a.c = a.c + beat_idx[COL_W-1:0];
+    if (!wrq.active) begin
+      return;
+    end
+    addr_t a; a.b = wrq.b; a.r = wrq.r; a.c = wrq.c; // latched at CMD_WRITE
     logic [DATA_W-1:0] cur = mem[idx(a)];
     logic [DATA_W-1:0] nxt = dq_out;
     // DQM: 1=mask (keep existing byte)
     for (int by=0; by<BE_W; by++) if (dqm[by]) nxt[8*by +: 8] = cur[8*by +: 8];
     mem[idx(a)] = nxt;
-    beat_idx++;
-    if (beat_idx >= BL) beat_idx = 0;
+    wrq.c = wrq.c + 1'b1;
+    wrq.beats_left = wrq.beats_left - 1;
+    if (wrq.beats_left == 1) wrq.active = 1'b0;
   endtask
 
   // Sample on both edges of DQS when the controller owns the bus.

@@ -6,13 +6,31 @@
         "name": "",
         "description": "",
         "clock_mhz": null,
-        "reset": { "active_low": true, "sync": true },
-        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "reset": { "active_low": null, "sync": null },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" },
         "mem": { "depth": null, "data_bits": null },
         "timing": { "read_latency_cycles": null },
-        "write_enable_mask": false,
+        "sram": {
+          "read_mode": "",
+          "write_mode": "",
+          "setup_cycles": null,
+          "hold_cycles": null,
+          "gap_cycles": null
+        },
+        "write_enable_mask": null,
+        "byte_enable_granularity": null,
         "chip_selects": 1,
-        "ecc": { "enabled": false, "scheme": null }
+        "ecc": { "enabled": null, "scheme": null }
+      },
+      "generator": {
+        "template": "Generation/MC_Skeleton_Main.sv",
+        "includes": [
+          "Generation/MC_skeleton_params.svh",
+          "Generation/MC_skeleton_interfaces.sv"
+        ],
+        "example_reference": "",
+        "top_module": "mc_top",
+        "output_files": [ "mc_top.sv" ]
       },
       "ask_order": [
         "reset.active_low",
@@ -24,7 +42,13 @@
         "mem.data_bits",
         "mem.depth",
         "timing.read_latency_cycles",
+        "sram.read_mode",
+        "sram.write_mode",
+        "sram.setup_cycles",
+        "sram.hold_cycles",
+        "sram.gap_cycles",
         "write_enable_mask",
+        "byte_enable_granularity",
         "ecc.enabled",
         "ecc.scheme",
         "clock_mhz"
@@ -39,7 +63,13 @@
         "mem.data_bits": 32,
         "mem.depth": 4096,
         "timing.read_latency_cycles": 1,
+        "sram.read_mode": "registered",
+        "sram.write_mode": "write_first",
+        "sram.setup_cycles": 0,
+        "sram.hold_cycles": 0,
+        "sram.gap_cycles": 0,
         "write_enable_mask": true,
+        "byte_enable_granularity": 8,
         "ecc.enabled": false,
         "ecc.scheme": "parity",
         "clock_mhz": 200
@@ -52,15 +82,33 @@
         "name": "",
         "description": "",
         "clock_mhz": null,
-        "reset": { "active_low": true, "sync": true },
+        "reset": { "active_low": null, "sync": null },
         "host_if": {
-          "portA": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
-          "portB": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" }
+          "portA": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" },
+          "portB": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" }
         },
         "mem": { "depth": null, "data_bits": null },
         "timing": { "read_latency_cycles": null },
+        "sram": {
+          "read_mode": "",
+          "write_mode": "",
+          "setup_cycles": null,
+          "hold_cycles": null,
+          "gap_cycles": null
+        },
+        "byte_enable_granularity": null,
         "conflicts": { "same_address": "" },
-        "ecc": { "enabled": false, "scheme": null }
+        "ecc": { "enabled": null, "scheme": null }
+      },
+      "generator": {
+        "template": "Generation/MC_Skeleton_Main.sv",
+        "includes": [
+          "Generation/MC_skeleton_params.svh",
+          "Generation/MC_skeleton_interfaces.sv"
+        ],
+        "example_reference": "",
+        "top_module": "mc_top",
+        "output_files": [ "mc_top.sv" ]
       },
       "ask_order": [
         "reset.active_low",
@@ -76,6 +124,12 @@
         "mem.data_bits",
         "mem.depth",
         "timing.read_latency_cycles",
+        "sram.read_mode",
+        "sram.write_mode",
+        "sram.setup_cycles",
+        "sram.hold_cycles",
+        "sram.gap_cycles",
+        "byte_enable_granularity",
         "conflicts.same_address",
         "ecc.enabled",
         "ecc.scheme",
@@ -95,6 +149,12 @@
         "mem.data_bits": 32,
         "mem.depth": 8192,
         "timing.read_latency_cycles": 1,
+        "sram.read_mode": "registered",
+        "sram.write_mode": "write_first",
+        "sram.setup_cycles": 0,
+        "sram.hold_cycles": 0,
+        "sram.gap_cycles": 0,
+        "byte_enable_granularity": 8,
         "conflicts.same_address": "stall_B",
         "ecc.enabled": false,
         "ecc.scheme": "parity",
@@ -108,16 +168,27 @@
         "name": "",
         "description": "",
         "clock_mhz": null,
-        "reset": { "active_low": true, "sync": true },
-        "host_if": { "bus": "custom", "data_bits": null, "addr_bits": 0, "endian": "little" },
+        "reset": { "active_low": null, "sync": null },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" },
         "fifo": {
           "depth": null,
           "data_bits": null,
           "iface": "",
+          "fwft": null,
           "almost_full_thresh": null,
           "almost_empty_thresh": null
         },
         "behavior": { "on_overflow": "", "on_underflow": "" }
+      },
+      "generator": {
+        "template": "Generation/MC_Skeleton_Main.sv",
+        "includes": [
+          "Generation/MC_skeleton_params.svh",
+          "Generation/MC_skeleton_interfaces.sv"
+        ],
+        "example_reference": "",
+        "top_module": "fifo_top",
+        "output_files": [ "fifo_top.sv" ]
       },
       "ask_order": [
         "reset.active_low",
@@ -126,6 +197,7 @@
         "fifo.data_bits",
         "fifo.depth",
         "fifo.iface",
+        "fifo.fwft",
         "fifo.almost_full_thresh",
         "fifo.almost_empty_thresh",
         "behavior.on_overflow",
@@ -139,6 +211,7 @@
         "fifo.data_bits": 32,
         "fifo.depth": 1024,
         "fifo.iface": "ready_valid",
+        "fifo.fwft": false,
         "fifo.almost_full_thresh": 896,
         "fifo.almost_empty_thresh": 128,
         "behavior.on_overflow": "stall_writer",
@@ -153,11 +226,21 @@
         "name": "",
         "description": "",
         "clock_mhz": null,
-        "reset": { "active_low": true, "sync": true },
-        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "reset": { "active_low": null, "sync": null },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" },
         "mem": { "depth": null, "data_bits": null },
         "init": { "type": "", "source": "" },
         "timing": { "read_latency_cycles": null }
+      },
+      "generator": {
+        "template": "Generation/MC_Skeleton_Main.sv",
+        "includes": [
+          "Generation/MC_skeleton_params.svh",
+          "Generation/MC_skeleton_interfaces.sv"
+        ],
+        "example_reference": "",
+        "top_module": "rom_top",
+        "output_files": [ "rom_top.sv" ]
       },
       "ask_order": [
         "reset.active_low",
@@ -195,8 +278,8 @@
         "name": "",
         "description": "",
         "clock_mhz": null,
-        "reset": { "active_low": true, "sync": true },
-        "host_if": { "bus": "custom", "data_bits": null, "addr_bits": 0, "endian": "little" },
+        "reset": { "active_low": null, "sync": null },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" },
         "regfile": {
           "entries": null,
           "data_bits": null,
@@ -205,6 +288,16 @@
           "bypass_on_same_cycle": null,
           "hazard_policy": ""
         }
+      },
+      "generator": {
+        "template": "Generation/MC_Skeleton_Main.sv",
+        "includes": [
+          "Generation/MC_skeleton_params.svh",
+          "Generation/MC_skeleton_interfaces.sv"
+        ],
+        "example_reference": "",
+        "top_module": "regfile_top",
+        "output_files": [ "regfile_top.sv" ]
       },
       "ask_order": [
         "reset.active_low",
@@ -238,15 +331,15 @@
         "name": "",
         "description": "",
         "clock_mhz": null,
-        "reset": { "active_low": true, "sync": true },
-        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "reset": { "active_low": null, "sync": null },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" },
         "dram": {
           "tech": "SDR",
           "row_bits": null,
           "col_bits": null,
-          "bank_bits": 2,
+          "bank_bits": null,
           "burst_len": null,
-          "row_policy": "open_page"
+          "row_policy": ""
         },
         "timing": {
           "tRCD": null,
@@ -255,8 +348,22 @@
           "tRAS": null
         },
         "refresh": { "period_ns": null, "per_rows": 8192 },
-        "scheduler": { "policy": "FCFS" },
-        "ecc": { "enabled": false, "scheme": null }
+        "init": { "required": null, "type": "" },
+        "scheduler": { "policy": "" },
+        "ecc": { "enabled": null, "scheme": null }
+      },
+      "generator": {
+        "template": "Generation/MC_Skeleton_Main.sv",
+        "includes": [
+          "Generation/MC_skeleton_params.svh",
+          "Generation/MC_skeleton_interfaces.sv"
+        ],
+        "example_reference": "",
+        "top_module": "sdram_top",
+        "output_files": [ "sdram_top.sv" ],
+        "contracts": {
+          "host_if": "Generation/host_if_contract.svh"
+        }
       },
       "ask_order": [
         "reset.active_low",
@@ -267,6 +374,7 @@
         "host_if.addr_bits",
         "dram.row_bits",
         "dram.col_bits",
+        "dram.bank_bits",
         "dram.burst_len",
         "dram.row_policy",
         "timing.tRCD",
@@ -274,6 +382,8 @@
         "timing.tRP",
         "timing.tRAS",
         "refresh.period_ns",
+        "init.required",
+        "init.type",
         "scheduler.policy",
         "ecc.enabled",
         "ecc.scheme",
@@ -288,6 +398,7 @@
         "host_if.addr_bits": 24,
         "dram.row_bits": 12,
         "dram.col_bits": 10,
+        "dram.bank_bits": 2,
         "dram.burst_len": 4,
         "dram.row_policy": "open_page",
         "timing.tRCD": 3,
@@ -295,6 +406,8 @@
         "timing.tRP": 3,
         "timing.tRAS": 7,
         "refresh.period_ns": 7800,
+        "init.required": true,
+        "init.type": "jedec",
         "scheduler.policy": "FCFS",
         "ecc.enabled": false,
         "ecc.scheme": "SECDED",
@@ -308,15 +421,15 @@
         "name": "",
         "description": "",
         "clock_mhz": null,
-        "reset": { "active_low": true, "sync": true },
-        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "reset": { "active_low": null, "sync": null },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" },
         "dram": {
           "tech": "DDR",
           "row_bits": null,
           "col_bits": null,
-          "bank_bits": 4,
+          "bank_bits": null,
           "burst_len": null,
-          "row_policy": "open_page",
+          "row_policy": "",
           "dqs": true
         },
         "timing": {
@@ -329,9 +442,23 @@
           "tRTP": null
         },
         "refresh": { "period_ns": null, "per_rows": 8192 },
-        "scheduler": { "policy": "FR-FCFS" },
+        "init": { "required": null, "type": "" },
+        "scheduler": { "policy": "" },
         "phy": { "read_dqs_gate": true },
-        "ecc": { "enabled": false, "scheme": null }
+        "ecc": { "enabled": null, "scheme": null }
+      },
+      "generator": {
+        "template": "Generation/MC_Skeleton_Main.sv",
+        "includes": [
+          "Generation/MC_skeleton_params.svh",
+          "Generation/MC_skeleton_interfaces.sv"
+        ],
+        "example_reference": "",
+        "top_module": "ddr_top",
+        "output_files": [ "ddr_top.sv" ],
+        "contracts": {
+          "host_if": "Generation/host_if_contract.svh"
+        }
       },
       "ask_order": [
         "reset.active_low",
@@ -342,6 +469,7 @@
         "host_if.addr_bits",
         "dram.row_bits",
         "dram.col_bits",
+        "dram.bank_bits",
         "dram.burst_len",
         "dram.row_policy",
         "timing.tRCD",
@@ -352,6 +480,8 @@
         "timing.tWTR",
         "timing.tRTP",
         "refresh.period_ns",
+        "init.required",
+        "init.type",
         "scheduler.policy",
         "ecc.enabled",
         "ecc.scheme",
@@ -366,6 +496,7 @@
         "host_if.addr_bits": 26,
         "dram.row_bits": 13,
         "dram.col_bits": 10,
+        "dram.bank_bits": 4,
         "dram.burst_len": 4,
         "dram.row_policy": "open_page",
         "timing.tRCD": 3,
@@ -376,6 +507,8 @@
         "timing.tWTR": 2,
         "timing.tRTP": 2,
         "refresh.period_ns": 7800,
+        "init.required": true,
+        "init.type": "jedec",
         "scheduler.policy": "FR-FCFS",
         "ecc.enabled": false,
         "ecc.scheme": "SECDED",
@@ -389,15 +522,15 @@
         "name": "",
         "description": "",
         "clock_mhz": null,
-        "reset": { "active_low": true, "sync": true },
-        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "little" },
+        "reset": { "active_low": null, "sync": null },
+        "host_if": { "bus": "", "data_bits": null, "addr_bits": null, "endian": "" },
         "dram": {
           "tech": "DDR2",
           "row_bits": null,
           "col_bits": null,
-          "bank_bits": 4,
+          "bank_bits": null,
           "burst_len": null,
-          "row_policy": "open_page",
+          "row_policy": "",
           "dqs": true,
           "odt": true,
           "dll_enable": true
@@ -414,9 +547,27 @@
           "tFAW": null
         },
         "refresh": { "period_ns": null, "per_rows": 8192 },
-        "scheduler": { "policy": "FR-FCFS" },
+        "init": { "required": null, "type": "" },
+        "scheduler": { "policy": "" },
         "phy": { "read_dqs_gate": true, "write_leveling": false },
-        "ecc": { "enabled": false, "scheme": null }
+        "ecc": { "enabled": null, "scheme": null }
+      },
+      "generator": {
+        "template": "Generation/ddr2_mem_contr_skeleton.v",
+        "includes": [
+          "Generation/ddr2_timing_params.svh",
+          "Generation/MC_skeleton_params.svh",
+          "Generation/MC_skeleton_interfaces.sv"
+        ],
+        "example_reference": "Generation/DDR2_Controller_example_1.v",
+        "top_module": "ddr2_mem_controller",
+        "output_files": [ "ddr2_mem_controller.sv" ],
+        "contracts": {
+          "host_if": "Generation/host_if_contract.svh",
+          "phy": "Generation/phy_interface_contract.md",
+          "pinmap": "Generation/micron_ddr2_pinmap.md",
+          "init": "Generation/jedec_ddr2_init_excerpt.txt"
+        }
       },
       "ask_order": [
         "reset.active_low",
@@ -427,6 +578,7 @@
         "host_if.addr_bits",
         "dram.row_bits",
         "dram.col_bits",
+        "dram.bank_bits",
         "dram.burst_len",
         "dram.row_policy",
         "timing.tRCD",
@@ -439,6 +591,8 @@
         "timing.tRTP",
         "timing.tFAW",
         "refresh.period_ns",
+        "init.required",
+        "init.type",
         "scheduler.policy",
         "ecc.enabled",
         "ecc.scheme",
@@ -453,6 +607,7 @@
         "host_if.addr_bits": 27,
         "dram.row_bits": 13,
         "dram.col_bits": 10,
+        "dram.bank_bits": 4,
         "dram.burst_len": 4,
         "dram.row_policy": "open_page",
         "timing.tRCD": 4,
@@ -465,6 +620,8 @@
         "timing.tRTP": 2,
         "timing.tFAW": 10,
         "refresh.period_ns": 7800,
+        "init.required": true,
+        "init.type": "jedec",
         "scheduler.policy": "FR-FCFS",
         "ecc.enabled": false,
         "ecc.scheme": "SECDED",
