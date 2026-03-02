@@ -42,10 +42,16 @@ class Phase:
     cwd: Path
 
 
+def _which_shell() -> str:
+    if (Path(PY).parent / "pwsh.exe").exists():
+        return "pwsh"
+    return "powershell"
+
+
 PHASES = [
     Phase("Front End Chat", [PY, str(FE_DIR / "chat.py")], FE_DIR),
     Phase("Generation", [PY, str(GEN_DIR / "mc_generator_v2.py")], GEN_DIR),
-    Phase("Verification", ["pwsh", "-File", str(VER_DIR / "run.ps1")], VER_DIR),
+    Phase("Verification", [_which_shell(), "-File", str(VER_DIR / "run.ps1")], VER_DIR),
 ]
 
 
@@ -102,6 +108,7 @@ def _clear_specs_and_dut(log_fn) -> None:
     ver_specs = VER_DIR / "specs"
     dut_dir = VER_DIR / "DUT"
     gen_out = GEN_DIR / "output"
+    ver_logs = VER_DIR / "logs"
     gen_spec_count = 0
     ver_spec_count = 0
     dut_count = 0
@@ -144,8 +151,23 @@ def _clear_specs_and_dut(log_fn) -> None:
                     p.rmdir()
                 except Exception:
                     pass
+    log_count = 0
+    if ver_logs.exists():
+        for p in ver_logs.rglob("*"):
+            if p.is_file():
+                try:
+                    p.unlink()
+                    log_count += 1
+                except Exception:
+                    pass
+        for p in sorted(ver_logs.rglob("*"), reverse=True):
+            if p.is_dir():
+                try:
+                    p.rmdir()
+                except Exception:
+                    pass
     log_fn(f"[clear] specs: gen={gen_spec_count}, ver={ver_spec_count}; "
-           f"DUT files={dut_count}; gen output files={out_count}")
+           f"DUT files={dut_count}; gen output files={out_count}; logs={log_count}")
 
 
 class RunnerThread(QThread):

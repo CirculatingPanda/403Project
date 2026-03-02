@@ -86,11 +86,19 @@ def render_placeholders(template_text: str, spec: dict) -> str:
     data_width = int(spec.get("data_width", 32))
     addr_width = int(spec.get("addr_width", 16))
     endian     = spec.get("endian", "little")
-    clk_mhz    = float((spec.get("sim", {}) or {}).get("clock_mhz", 100))
+    clk_mhz    = float((spec.get("sim", {}) or {}).get("clock_mhz", spec.get("clock_mhz", 100)))
     num_txns   = int((spec.get("sim", {}) or {}).get("num_transactions", 200))
+
+    # FIFO-specific fields (if present)
+    fifo = spec.get("fifo", {}) or {}
+    fifo_data_bits = int(fifo.get("data_bits", data_width))
+    fifo_depth = int(fifo.get("depth", 256))
+    fifo_af = int(fifo.get("almost_full_thresh", max(1, fifo_depth - 1)))
+    fifo_ae = int(fifo.get("almost_empty_thresh", 1))
 
     golden_stub = "/* golden SRAM sync model omitted for this config */"
     preload     = "/* no preload */"
+    fifo_golden = "/* golden FIFO model omitted for this config */"
 
     out = template_text
     out = out.replace("{{DATA_WIDTH}}", str(data_width))
@@ -100,6 +108,11 @@ def render_placeholders(template_text: str, spec: dict) -> str:
     out = out.replace("{{NUM_TRANSACTIONS}}", str(num_txns))
     out = out.replace("{{INCLUDE_GOLDEN_SRAM_SYNC}}", golden_stub)
     out = out.replace("{{PRELOAD_SNIPPET}}", preload)
+    # FIFO placeholders
+    out = out.replace("{{DEPTH}}", str(fifo_depth))
+    out = out.replace("{{ALMOST_FULL}}", str(fifo_af))
+    out = out.replace("{{ALMOST_EMPTY}}", str(fifo_ae))
+    out = out.replace("{{INCLUDE_GOLDEN_FIFO}}", fifo_golden)
     return out
 
 # ----------------------------
@@ -841,10 +854,16 @@ def icarus_syntax_check(tb_path: Path) -> Tuple[bool, str]:
     """
     original = tb_path.read_text(encoding="utf-8")
 
+    # Try to detect the module instantiated in TB
+    try:
+        dut_mod, _ = _extract_tb_instantiation(original)
+    except Exception:
+        dut_mod = DEFAULT_DUT_MODULE
+
     # Regex to find the DUT instantiation (with or without parameters)
     inst_re = re.compile(
-        rf"({DEFAULT_DUT_MODULE}\s*#\s*\([^;]*?\)\s+\w+\s*\([^;]*?\)\s*;|"
-        rf"{DEFAULT_DUT_MODULE}\s+\w+\s*\([^;]*?\)\s*;)",
+        rf"({re.escape(dut_mod)}\s*#\s*\([^;]*?\)\s+\w+\s*\([^;]*?\)\s*;|"
+        rf"{re.escape(dut_mod)}\s+\w+\s*\([^;]*?\)\s*;)",
         re.S,
     )
 
@@ -887,7 +906,7 @@ def icarus_syntax_check(tb_path: Path) -> Tuple[bool, str]:
 # Define the slice plan by @LLM_EDIT region names present in templates
 SLICE_PLAN: list[list[str]] = [
     ["TIMING_CYCLES"],                  # initializations
-    ["TASK_DO_WRITE", "TASK_DO_READ"],  # driver tasks
+    ["TASK_DO_WRITE", "TASK_DO_READ", "TASK_PUSH", "TASK_POP"],  # driver tasks
     ["MAIN_SCENARIO"],                  # main traffic
     ["EMIT_RESULTS"],                   # result emitter
 ]
@@ -1126,10 +1145,84 @@ def auto_resolve_dut_module(tb_text: str,
     return tb_text, preferred, False
 
 
+def _ensure_signal_decl(tb_text: str, name: str, decl: str) -> str:
+    if re.search(rf"\b{name}\b", tb_text):
+        return tb_text
+    # Insert after dout declaration if present, else after wr_en/rd_en block.
+    m = re.search(r"^\s*wire\s+\[DATA_W-1:0\]\s+dout\s*;\s*$", tb_text, re.M)
+    if m:
+        insert_at = m.end()
+        return tb_text[:insert_at] + "\n" + decl + tb_text[insert_at:]
+    m2 = re.search(r"^\s*logic\s+rd_en\s*;\s*$", tb_text, re.M)
+    if m2:
+        insert_at = m2.end()
+        return tb_text[:insert_at] + "\n" + decl + tb_text[insert_at:]
+    return tb_text
+
+
+def _adapt_tb_to_dut_ports(tb_text: str, dut_ports: List[str], kind: str) -> Tuple[str, bool]:
+    """
+    Heuristic adapter to map common DUT interface variants into TB signal names.
+    """
+    changed = False
+    # rstn alias
+    if "rst_n" in dut_ports and ".rstn" in tb_text and ".rst_n" not in tb_text:
+        tb_text = tb_text.replace(".rstn", ".rst_n")
+        changed = True
+
+    # FIFO ready/valid mapping
+    fifo_rv = {"wr_valid", "wr_ready", "wr_data", "rd_valid", "rd_ready", "rd_data"}
+    if kind == "fifo_controller" or fifo_rv.issubset(set(dut_ports)):
+        # Update parameter names to match typical FIFO generator output
+        before = tb_text
+        tb_text = tb_text.replace(".DATA_W", ".DATA_WIDTH")
+        tb_text = tb_text.replace(".AF_LVL", ".ALMOST_FULL")
+        tb_text = tb_text.replace(".AE_LVL", ".ALMOST_EMPTY")
+        if tb_text != before:
+            changed = True
+        # Ensure signals exist
+        tb_text = _ensure_signal_decl(tb_text, "wr_ready", "  wire                  wr_ready;")
+        tb_text = _ensure_signal_decl(tb_text, "rd_valid", "  wire                  rd_valid;")
+        # Remap connections if classic ports are used
+        repls = [
+            (r"\.wr_en\s*\(\s*wr_en\s*\)", ".wr_valid    (wr_en)"),
+            (r"\.rd_en\s*\(\s*rd_en\s*\)", ".rd_ready    (rd_en)"),
+            (r"\.din\s*\(\s*din\s*\)", ".wr_data     (din)"),
+            (r"\.dout\s*\(\s*dout\s*\)", ".rd_data     (dout)"),
+        ]
+        for pat, rep in repls:
+            if re.search(pat, tb_text):
+                tb_text = re.sub(pat, rep, tb_text)
+                changed = True
+        # Ensure almost_empty line has a trailing comma before inserting new ports
+        tb_text = re.sub(
+            r"(\.almost_empty\s*\(\s*almost_empty\s*\))\s*(\n\s*\))",
+            r"\1,\n\2",
+            tb_text,
+        )
+        # Add wr_ready/rd_valid ports if missing
+        inserted_wr = False
+        inserted_rd = False
+        if ".wr_ready" not in tb_text and "wr_ready" in dut_ports:
+            tb_text = tb_text.replace("  );", "    .wr_ready   (wr_ready),\n  );", 1)
+            changed = True
+            inserted_wr = True
+        if ".rd_valid" not in tb_text and "rd_valid" in dut_ports:
+            tb_text = tb_text.replace("  );", "    .rd_valid   (rd_valid),\n  );", 1)
+            changed = True
+            inserted_rd = True
+        # If rd_valid was inserted last, remove trailing comma
+        if inserted_rd:
+            tb_text = tb_text.replace("    .rd_valid   (rd_valid),\n  );", "    .rd_valid   (rd_valid)\n  );", 1)
+
+    return tb_text, changed
+
+
 def check_dut_ports_against_tb(tb_text: str,
                                dut_files: List[Path],
                                dut_module: str = DEFAULT_DUT_MODULE,
-                               allow_missing: bool = False) -> None:
+                               allow_missing: bool = False,
+                               kind: str = "") -> None:
     """
     Compare the port list implied by the TB's DUT instantiation against the
     port list in the DUT module header. Abort early if they differ.
@@ -1150,11 +1243,21 @@ def check_dut_ports_against_tb(tb_text: str,
     tb_set = set(tb_ports)
     dut_set = set(dut_ports)
 
+    # Drop known FIFO parameter names if they appear in TB port list but not DUT ports
+    param_like = {"DATA_W", "DATA_WIDTH", "DEPTH", "AF_LVL", "AE_LVL", "ALMOST_FULL", "ALMOST_EMPTY"}
+    if any(p in tb_set for p in param_like):
+        tb_ports = [p for p in tb_ports if p in dut_set or p not in param_like]
+        tb_set = set(tb_ports)
+
     missing_in_dut = tb_set - dut_set
     extra_in_dut   = dut_set - tb_set
 
+    # Allow optional DUT-only ports for known kinds
+    if kind == "fifo_controller":
+        extra_in_dut = extra_in_dut - {"fill_count"}
+
     ok = True
-    if missing_in_dut or extra_in_dut or (len(tb_ports) != len(dut_ports)):
+    if missing_in_dut or extra_in_dut:
         ok = False
 
     if not ok:
@@ -1400,6 +1503,7 @@ def main():
         raise SystemExit("[generate_tb] Aborting: staged generation failed.")
 
     # 3) Final whole-file checker pass
+    tb_current = icarus_fixups(tb_current)
     print("[final] whole-file checker pass...")
     tb_final, meta_final = run_checker_loop(tb_current, spec, args.checker_model, args.max_iters)
     tb_final = icarus_fixups(tb_final)  # final safety pass
@@ -1450,17 +1554,26 @@ def main():
         tb_final, resolved_module, resolved_ok = auto_resolve_dut_module(
             tb_final, dut_files, dut_module_name
         )
-        if tb_final != tb_final_before:
-            write(out_path, tb_final)
         if resolved_ok and resolved_module != dut_module_name:
             print(f"[generate_tb] Auto-resolved DUT module: {resolved_module} (was {dut_module_name})")
             dut_module_name = resolved_module
+        # Adapt TB to DUT port variants (FIFO ready/valid, rst_n, etc.)
+        try:
+            dut_ports = _extract_dut_module_ports(dut_files, dut_module_name)
+            tb_final, adapted = _adapt_tb_to_dut_ports(tb_final, dut_ports, kind)
+            if adapted:
+                print("[generate_tb] Adapted TB to DUT port naming.")
+        except Exception:
+            pass
+        if tb_final != tb_final_before:
+            write(out_path, tb_final)
         print(f"[generate_tb] DUT module for port-check: {dut_module_name}")
         check_dut_ports_against_tb(
             tb_final,
             dut_files,
             dut_module=dut_module_name,
             allow_missing=not resolved_ok,
+            kind=kind,
         )
 
     if dut_files:

@@ -1,24 +1,25 @@
 {
   "kind": "fifo_controller",
-  "name": "demo_fifo",
-  "description": "Simple 256-deep synchronous FIFO",
-  "clock_mhz": 100,
+  "name": "",
+  "description": "",
+  "clock_mhz": 200,
   "reset": {
     "active_low": true,
     "sync": true
   },
   "host_if": {
-    "bus": "custom",
-    "data_bits": 32,
-    "addr_bits": 0,
+    "bus": "",
+    "data_bits": null,
+    "addr_bits": null,
     "endian": "little"
   },
   "fifo": {
-    "depth": 256,
+    "depth": 1024,
     "data_bits": 32,
     "iface": "ready_valid",
-    "almost_full_thresh": 224,
-    "almost_empty_thresh": 32
+    "fwft": false,
+    "almost_full_thresh": 896,
+    "almost_empty_thresh": 128
   },
   "behavior": {
     "on_overflow": "stall_writer",

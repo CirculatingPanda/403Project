@@ -1,480 +1,371 @@
-// tb_sram_sync.sv — skeleton testbench for a basic *synchronous* SRAM controller
-// Guarded with @LLM_EDIT blocks for localized LLM edits.
+// tb_fifo_sync.sv — skeleton testbench for a simple synchronous FIFO controller
+// Guarded with @LLM_EDIT blocks for the LLM to fill localized logic.
 
 `timescale 1ns/1ps
 module tb;
 
   // ------------------------------
-  // Parameters (filled by your generator)
+  // Params (filled by your generator)
   // ------------------------------
-  localparam int  DATA_W = 32;              // e.g., 32
-  localparam int  ADDR_W = 16;              // e.g., 18
-  localparam int  BE_W   = (DATA_W/8>0)?(DATA_W/8):1;
-  localparam bit  LITTLE_ENDIAN = 1; // 1 little, 0 big
-  localparam real CLK_MHZ = 100;                // e.g., 100
-  localparam real CLK_NS  = (1000.0/CLK_MHZ);
-localparam int NUM_TXNS = 200;                  // e.g., 200
+  localparam int  DATA_W   = 32;     // e.g., 32
+  localparam int  DEPTH    = 1024;          // e.g., 256
+  localparam int  AF_LEVEL = 896;    // optional, else set == DEPTH-1
+  localparam int  AE_LEVEL = 128;   // optional, else set == 1
+  localparam real CLK_MHZ  = 200;        // e.g., 100
+  localparam real CLK_NS   = (1000.0/CLK_MHZ);
+localparam int NUM_TXNS = 200;          // total push+pop ops target
 
   // ------------------------------
-  // Derived timing in cycles (LLM fills from context.timing_cycles)
-  // Common sync knobs: read/write latency, min gaps, setup/hold in cycles, etc.
+  // Timing in cycles (LLM fills if you model setup/hold/gaps)
   // ------------------------------
   // @LLM_EDIT BEGIN TIMING_CYCLES
-int T_RD_LAT_CYC = 1;  // cycles from read request to valid rdata
-int T_WR_LAT_CYC = 0;  // not specified, default 0
-int T_SETUP_CYC  = 0;  // not specified, default 0
-int T_HOLD_CYC   = 0;  // not specified, default 0
-int T_GAP_CYC    = 0;  // not specified, default 0
+int T_PUSH_GAP_CYC = 0; // min cycles between pushes
+int T_POP_GAP_CYC  = 0;  // min cycles between pops
   // @LLM_EDIT END TIMING_CYCLES
 
   // ------------------------------
-  // Clock / Reset
+  // Clk/Reset
   // ------------------------------
   logic clk = 1'b0;
   logic rstn = 1'b0;
   always #(CLK_NS/2.0) clk = ~clk;
 
   // ------------------------------
-  // DUT I/O (typical sync SRAM bus)
+  // DUT I/O (typical simple FIFO)
   // ------------------------------
-  logic                 req;     // request/enable
-  logic                 we;      // 1=write, 0=read
-  logic [ADDR_W-1:0]    addr;
-  logic [DATA_W-1:0]    wdata;
-  logic [BE_W-1:0]      be;
-  wire  [DATA_W-1:0]    rdata;
-  wire                  rvalid;  // read-data valid (or ready)
+  logic                 wr_en;
+  logic                 rd_en;
+  logic [DATA_W-1:0]    din;
+  wire  [DATA_W-1:0]    dout;
+  wire                  full;
+  wire                  empty;
+  wire                  almost_full;
+  wire                  almost_empty;
 
   // ------------------------------
-  // Instantiate DUT (teammate’s controller)
+  // /* DUT instantiation elided for syntax check */
+/* Instantiate DUT (teammate’s FIFO)
   // ------------------------------
-  /* DUT instantiation elided for syntax check */
-/* sram_sync_ctrl #(
+  fifo_ctrl #(
     .DATA_W (DATA_W),
-    .ADDR_W (ADDR_W)
+    .DEPTH  (DEPTH),
+    .AF_LVL (AF_LEVEL),
+    .AE_LVL (AE_LEVEL)
   ) dut (
-    .clk    (clk),
-    .rstn   (rstn),
-    .req    (req),
-    .we     (we),
-    .addr   (addr),
-    .wdata  (wdata),
-    .be     (be),
-    .rdata  (rdata),
-    .rvalid (rvalid)
+    .clk          (clk),
+    .rstn         (rstn),
+    .wr_en        (wr_en),
+    .rd_en        (rd_en),
+    .din          (din),
+    .dout         (dout),
+    .full         (full),
+    .empty        (empty),
+    .almost_full  (almost_full),
+    .almost_empty (almost_empty)
   ); */
 
   // ------------------------------
-  // Golden model (synchronous, byte-enable aware, same latency)
+  // Golden FIFO model (behavioral, same interface semantics)
   // ------------------------------
-  /* golden SRAM sync model omitted for this config */
+  /* golden FIFO model omitted for this config */
 
   // ------------------------------
   // Optional assertions/monitors
   // ------------------------------
-  // `include "libraries/svassert/sram_sync_protocol.svh"
-  // sram_sync_protocol_asrt #(.DATA_W(DATA_W), .ADDR_W(ADDR_W)) chk (.*);
+  // `include "libraries/svassert/fifo_protocol.svh"
+  // fifo_protocol_asrt #(.DATA_W(DATA_W), .DEPTH(DEPTH)) chk (.*);
 
   // ------------------------------
-  // Preload / init content (deterministic expansion)
+  // Driver tasks (LLM fills legal sequences that respect full/empty)
   // ------------------------------
-  /* no preload */
-
-  // ------------------------------
-  // Endianness helpers
-  // ------------------------------
-  function automatic [DATA_W-1:0] pack_bytes(input logic [8*BE_W-1:0] B_flat);
+  // @LLM_EDIT BEGIN TASK_PUSH
+task automatic do_push(input logic [DATA_W-1:0] d);
   int i;
-  pack_bytes = '0;
-  for (i = 0; i < BE_W; i++) begin
-    if (LITTLE_ENDIAN) begin
-      pack_bytes[i*8 +: 8] = B_flat[i*8 +: 8];
-    end else begin
-      pack_bytes[(BE_W-1-i)*8 +: 8] = B_flat[i*8 +: 8];
-    end
-  end
-endfunction
+  // Wait for space in FIFO synchronized to clk
+  while (full) @(posedge clk);
+  // Issue push on next clock edge
+  @(posedge clk);
+  din   <= d;
+  wr_en <= 1'b1;
+  // Hold for exactly one cycle
+  @(posedge clk);
+  wr_en <= 1'b0;
+  din   <= '0;
+  // Respect inter-push gap cycles
+  for (i = 0; i < T_PUSH_GAP_CYC; i = i + 1) @(posedge clk);
+endtask
+  // @LLM_EDIT END TASK_PUSH
 
-  // ------------------------------
-  // Driver tasks (LLM fills legal synchronous sequences)
-  // ------------------------------
-  // @LLM_EDIT BEGIN TASK_DO_WRITE
-task automatic do_write(
-    input  logic [ADDR_W-1:0] a,
-    input  logic [DATA_W-1:0] d,
-    input  logic [BE_W-1:0]   ben
-  );
-    int i;
-    begin
-      // Wait for reset deasserted and a couple cycles before starting
-      wait (rstn === 1'b1);
-      @(posedge clk);
-
-      // Deassert controls between transactions
-      req   <= 1'b0;
-      we    <= 1'b0;
-
-      // Drive address/data/byte-enables and respect setup time
-      addr  <= a;
-      wdata <= d;
-      be    <= ben;
-
-      if (T_SETUP_CYC > 0) begin
-        repeat (T_SETUP_CYC) @(posedge clk);
-      end else begin
-        @(posedge clk);
-      end
-
-      // Assert write request for one cycle
-      req <= 1'b1;
-      we  <= 1'b1;
-      @(posedge clk);
-
-      // Deassert request and write-enable; hold addr/data/be stable one more cycle
-      req <= 1'b0;
-      we  <= 1'b0;
-      @(posedge clk);
-
-      // Wait for write latency and optional gap cycles
-      if (T_WR_LAT_CYC > 0) begin
-        repeat (T_WR_LAT_CYC) @(posedge clk);
-      end
-      if (T_GAP_CYC > 0) begin
-        repeat (T_GAP_CYC) @(posedge clk);
-      end
-    end
-  endtask
-  // @LLM_EDIT END TASK_DO_WRITE
-
-  // @LLM_EDIT BEGIN TASK_DO_READ
-task automatic do_read(
-    input  logic [ADDR_W-1:0] a,
-    output logic [DATA_W-1:0] q
-  );
-    int i;
-    begin
-      // Wait for reset deasserted and a couple cycles before starting
-      wait (rstn === 1'b1);
-      @(posedge clk);
-
-      // Ensure write is deasserted between transactions
-      we   <= 1'b0;
-      req  <= 1'b0;
-
-      // Drive address and respect setup time before asserting request
-      addr <= a;
-
-      if (T_SETUP_CYC > 0) begin
-        repeat (T_SETUP_CYC) @(posedge clk);
-      end else begin
-        @(posedge clk);
-      end
-
-      // Assert read request for one cycle (we=0 indicates read)
-      req <= 1'b1;
-      @(posedge clk);
-      req <= 1'b0;
-
-      // Wait the programmed read latency cycles, then for rvalid if present
-      if (T_RD_LAT_CYC > 0) begin
-        repeat (T_RD_LAT_CYC) @(posedge clk);
-      end
-
-      // If rvalid is present, wait until it is asserted
-      while (rvalid !== 1'b1) begin
-        @(posedge clk);
-      end
-
-      // Sample rdata on the next posedge to avoid races
-      @(posedge clk);
-      q = rdata;
-
-      // Optional gap cycles before next transaction
-      if (T_GAP_CYC > 0) begin
-        repeat (T_GAP_CYC) @(posedge clk);
-      end
-    end
-  endtask
-  // @LLM_EDIT END TASK_DO_READ
+  // @LLM_EDIT BEGIN TASK_POP
+task automatic do_pop(output logic [DATA_W-1:0] q);
+  int i;
+  logic [DATA_W-1:0] tmp;
+  // Wait for data available synchronized to clk
+  while (empty) @(posedge clk);
+  // Issue pop on next clock edge
+  @(posedge clk);
+  rd_en <= 1'b1;
+  // Sample data on the following clock edge to avoid races
+  @(posedge clk);
+  tmp   = dout;
+  rd_en <= 1'b0;
+  q = tmp;
+  // Respect inter-pop gap cycles
+  for (i = 0; i < T_POP_GAP_CYC; i = i + 1) @(posedge clk);
+endtask
+  // @LLM_EDIT END TASK_POP
 
   // ------------------------------
   // Scoreboard
   // ------------------------------
   int                err_count = 0;
-  int                txn_count = 0;
-  logic              done = 1'b0;
-  int                TB_TIMEOUT_CYC = 1000;
+  int                pushes = 0, pops = 0;
   logic [DATA_W-1:0] got_q, exp_q;
 
-  task automatic check_eq(input [DATA_W-1:0] exp, input [DATA_W-1:0] got, input logic [ADDR_W-1:0] a);
+  task automatic check_eq(input [DATA_W-1:0] exp, input [DATA_W-1:0] got);
     if (exp !== got) begin
-      $display("[TB][MISMATCH] addr=0x%0h exp=0x%0h got=0x%0h", a, exp, got);
+      $display("[TB][MISMATCH] exp=0x%0h got=0x%0h", exp, got);
       err_count++;
     end
   endtask
 
   // ------------------------------
-  // Main scenario (LLM fills constrained traffic)
+  // MAIN_SCENARIO (LLM composes mixed traffic)
   // ------------------------------
-  // Exercise:
-  //  - write/read-after-write same address,
-  //  - byte-enable patterns,
-  //  - min/max addresses in address_map,
-  //  - bursts with T_GAP_CYC spacing,
-  //  - corner cases (be=0, single-byte, all-bytes).
+  // LLM goals:
+  //  * Generate bursts of pushes until almost_full, then pop some,
+  //  * Exercise boundaries: go to full, drain to empty,
+  //  * Cover almost_full/almost_empty transitions,
+  //  * Keep scoreboard aligned with golden model.
   // @LLM_EDIT BEGIN MAIN_SCENARIO
 initial begin
-    // Declarations first (Icarus quirk)
-    int BYTES;
-    int i, j, k;
-    int seed_iter;
-    logic [ADDR_W-1:0] a;
-    logic [DATA_W-1:0] d;
-    logic [DATA_W-1:0] exp_d;
-    logic [DATA_W-1:0] read_d;
-    logic [DATA_W-1:0] old_d;
-    logic [DATA_W-1:0] mask;
-    logic [BE_W-1:0]   ben;
-    logic [ADDR_W-1:0] addrs [0:3];
-    logic [7:0]        bval;
-    logic [DATA_W-1:0] model [0:(1<<ADDR_W)-1];
-    bit                 model_valid [0:(1<<ADDR_W)-1]; // validity flag per address
+    // Declarations first (Icarus requirement)
+    int ops;
+    int guard;
+    logic [$bits(din)-1:0] val;
+    logic [$bits(din)-1:0] exp;
+    logic [$bits(din)-1:0] got;
+    logic [$bits(din)-1:0] golden_q[$];
 
     // Reset/init
-    req = 1'b0;
-    we  = 1'b0;
-    addr  = '0;
-    wdata = '0;
-    be    = '0;
+    wr_en = 0;
+    rd_en = 0;
+    din   = '0;
+    val   = '0;
+
     repeat (5) @(posedge clk);
-    rstn <= 1'b1;
+    rstn <= 1;
     repeat (2) @(posedge clk);
-    // Initialize model_valid flags to 0 (Icarus-safe)
-    for (i = 0; i < (1<<ADDR_W); i++) begin
-      model_valid[i] = 1'b0;
-    end
 
-
-    // Setup helpers
-    BYTES = (DATA_W + 7) / 8;
-
-    // Deterministic set of addresses: min, max, a couple of low offsets
-    addrs[0] = '0;
-    addrs[1] = {ADDR_W{1'b1}};
-    addrs[2] = 'h10;
-    addrs[3] = 'h20;
-
-    // Helper: functionally build data pattern based on address and seed (byte-wise)
-    // (implemented inline per use to avoid nested function; using for-loop)
-
-    // Core targeted scenarios on specific addresses
-    for (i = 0; i < 4; i++) begin
-      a = addrs[i];
-
-      // 1) Write full word then read-after-write same address
-      ben = {BE_W{1'b1}};
-      d   = '0;
-      for (j = 0; j < BYTES; j++) begin
-        bval = (8'h11 * j) ^ a[7:0] ^ 8'hA5;
-        d[8*j +: 8] = bval;
-      end
-      do_write(a, d, ben);
-      do_read(a, read_d);
-      exp_d = d;
-      if (read_d !== exp_d) begin
-        $display("Mismatch RAW full write @%0h exp=%0h got=%0h", a, exp_d, read_d);
-        $fatal(1);
-      end
-      model[a] = exp_d; model_valid[a] = 1'b1;
-      txn_count++;
-
-      // 2) Corner: be=0 should not modify, read should remain previous
-      ben = '0;
-      d   = '0;
-      for (j = 0; j < BYTES; j++) begin
-        bval = (8'h3C ^ j[7:0]) ^ a[7:0];
-        d[8*j +: 8] = bval;
-      end
-      do_write(a, d, ben);
-      do_read(a, read_d);
-      exp_d = model_valid[a] ? model[a] : '0;
-      if (read_d !== exp_d) begin
-        $display("Mismatch be=0 write @%0h exp=%0h got=%0h", a, exp_d, read_d);
-        $fatal(1);
-      end
-      // model unchanged
-      txn_count++;
-
-      // 3) Corner: single-byte (or lane) updates; if BE_W==1 this degenerates to full-width
-      for (j = 0; j < BE_W; j++) begin
-        ben = '0;
-        ben[j] = 1'b1;
-        d = '0;
-        for (k = 0; k < BYTES; k++) begin
-          bval = (8'h5A ^ j[7:0]) ^ k[7:0] ^ a[7:0];
-          d[8*k +: 8] = bval;
-        end
-        // Build byte mask from ben
-        mask = '0;
-        for (k = 0; k < BYTES; k++) begin
-          if (BE_W == 1) begin
-            if (ben[0]) mask[8*k +: 8] = {8{1'b1}};
-          end else begin
-            if (k < BE_W && ben[k]) mask[8*k +: 8] = {8{1'b1}};
-          end
-        end
-        old_d = model_valid[a] ? model[a] : '0;
-        exp_d = (d & mask) | (old_d & ~mask);
-        do_write(a, d, ben);
-        do_read(a, read_d);
-        if (read_d !== exp_d) begin
-          $display("Mismatch single-lane write @%0h lane=%0d exp=%0h got=%0h", a, j, exp_d, read_d);
-          $fatal(1);
-        end
-        model[a] = exp_d;
-        txn_count++;
-      end
-
-      // 4) Corner: all-bytes enabled
-      ben = {BE_W{1'b1}};
-      d   = '0;
-      for (j = 0; j < BYTES; j++) begin
-        bval = (8'hC3 ^ ((j*7) & 8'hFF)) ^ a[7:0];
-        d[8*j +: 8] = bval;
-      end
-      do_write(a, d, ben);
-      do_read(a, read_d);
-      exp_d = d;
-      if (read_d !== exp_d) begin
-        $display("Mismatch all-bytes write @%0h exp=%0h got=%0h", a, exp_d, read_d);
-        $fatal(1);
-      end
-      model[a] = exp_d;
-      txn_count++;
-    end
-
-    // 5) Simple burst-like sequences with 1-cycle gap between operations
-    //    Writes followed by reads on consecutive addresses
-    a = 'h40;
-    for (i = 0; i < 4; i++) begin
-      ben = {BE_W{1'b1}};
-      d   = '0;
-      for (j = 0; j < BYTES; j++) begin
-        bval = (8'h77 ^ i[7:0]) ^ j[7:0] ^ a[7:0];
-        d[8*j +: 8] = bval;
-      end
-      do_write(a + ((i) & {ADDR_W{1'b1}}), d, ben);
-      @(posedge clk);
-      do_read(a + ((i) & {ADDR_W{1'b1}}), read_d);
-      exp_d = d;
-      if (read_d !== exp_d) begin
-        $display("Mismatch burst idx=%0d @%0h exp=%0h got=%0h", i, (a + ((i) & {ADDR_W{1'b1}})), exp_d, read_d);
-        $fatal(1);
-      end
-      model[a + ((i) & {ADDR_W{1'b1}})] = exp_d;
-      txn_count++;
-      @(posedge clk);
-    end
-
-    // 6) Deterministic broader coverage until reaching NUM_TXNS
-    seed_iter = 0;
-    while (txn_count < NUM_TXNS) begin
-      // Deterministic address sequence
-      a = (seed_iter * 32'h1F123BB5) ^ (seed_iter << 3);
-      // If first time seeing address, initialize with full write
-      if (!model_valid[a]) begin
-        model_valid[a] = 1'b1;
-
-        ben = {BE_W{1'b1}};
-        d = '0;
-        for (j = 0; j < BYTES; j++) begin
-          bval = (8'hA0 ^ seed_iter[7:0]) ^ j[7:0] ^ a[7:0];
-          d[8*j +: 8] = bval;
-        end
-        do_write(a, d, ben);
-        do_read(a, read_d);
-        exp_d = d;
-        if (read_d !== exp_d) begin
-          $display("Mismatch init write @%0h exp=%0h got=%0h", a, exp_d, read_d);
-          $fatal(1);
-        end
-        model[a] = exp_d;
-        txn_count++;
-      end
-
-      // Next, partial or full update depending on BE_W
-      d = '0;
-      for (j = 0; j < BYTES; j++) begin
-        bval = (8'h5C ^ ((seed_iter + j) & 8'hFF)) ^ a[7:0];
-        d[8*j +: 8] = bval;
-      end
-
-      if (BE_W == 1) begin
-        ben = {BE_W{1'b1}};
+    // Phase A: Push until almost_full
+    ops = 0;
+    guard = 0;
+    while (!almost_full && guard < 10000) begin
+      if (!full) begin
+        // Prepare next data deterministically
+        val = val + 1;
+        din <= val;
+        wr_en <= 1;
+        rd_en <= 0;
+        @(posedge clk);
+        wr_en <= 0;
+        // Golden model accepts write when full was low at request
+        golden_q.push_back(val);
+        pushes++;
+        ops++;
       end else begin
-        ben = '0;
-        ben[seed_iter % BE_W] = 1'b1;
+        wr_en <= 0;
+        rd_en <= 0;
+        @(posedge clk);
       end
-
-      // Build mask and expected
-      mask = '0;
-      for (j = 0; j < BYTES; j++) begin
-        if (BE_W == 1) begin
-          if (ben[0]) mask[8*j +: 8] = {8{1'b1}};
-        end else begin
-          if (j < BE_W && ben[j]) mask[8*j +: 8] = {8{1'b1}};
-        end
-      end
-      old_d = model[a];
-      exp_d = ( (BE_W == 1) ? d : ((d & mask) | (old_d & ~mask)) );
-
-      do_write(a, d, ben);
-      do_read(a, read_d);
-      if (read_d !== exp_d) begin
-        $display("Mismatch iter=%0d @%0h ben=%0b exp=%0h got=%0h", seed_iter, a, ben, exp_d, read_d);
-        $fatal(1);
-      end
-      model[a] = exp_d;
-      txn_count++;
-
-      // Small gap between transactions
-      @(posedge clk);
-      seed_iter++;
+      guard++;
     end
 
-    // Finish
-    req = 1'b0;
-    we  = 1'b0;
-    done = 1'b1;
+    // Continue pushes to reach full boundary
+    guard = 0;
+    while (!full && guard < 10000) begin
+      if (!full) begin
+        val = val + 1;
+        din <= val;
+        wr_en <= 1;
+        rd_en <= 0;
+        @(posedge clk);
+        wr_en <= 0;
+        golden_q.push_back(val);
+        pushes++;
+        ops++;
+      end else begin
+        wr_en <= 0;
+        rd_en <= 0;
+        @(posedge clk);
+      end
+      guard++;
+    end
+    wr_en <= 0;
+    rd_en <= 0;
+
+    // Phase B: Drain all to empty
+    guard = 0;
+    while (!empty && guard < 20000) begin
+      if (!empty) begin
+        wr_en <= 0;
+        rd_en <= 1;
+        // Issue pop request
+        @(posedge clk);
+        rd_en <= 0;
+        // Sample data on the following posedge to avoid races
+        @(posedge clk);
+        if (golden_q.size() == 0) begin
+          $display("Underflow: golden model empty during pop at t=%0t", $time);
+          err_count++;
+          $fatal(1, "Golden model underflow");
+        end
+        got = dout;
+        exp = golden_q.pop_front();
+        if (got !== exp) begin
+          $display("Data mismatch: exp=%0h got=%0h t=%0t", exp, got, $time);
+          err_count++;
+          $fatal(1, "Data mismatch");
+        end
+        pops++;
+        ops++;
+      end else begin
+        wr_en <= 0;
+        rd_en <= 0;
+        @(posedge clk);
+      end
+      guard++;
+    end
+    wr_en <= 0;
+    rd_en <= 0;
+
+    // Phase C: Mixed operations to cover almost_full/almost_empty transitions
+    while (ops < NUM_TXNS) begin
+      // Bias towards pushes when almost_empty, pops when almost_full
+      if (!full && (almost_empty || (ops % 3 != 0))) begin
+        val = val + 1;
+        din <= val;
+        wr_en <= 1;
+        rd_en <= 0;
+        @(posedge clk);
+        wr_en <= 0;
+        golden_q.push_back(val);
+        pushes++;
+        ops++;
+      end else if (!empty) begin
+        wr_en <= 0;
+        rd_en <= 1;
+        @(posedge clk);
+        rd_en <= 0;
+        @(posedge clk);
+        if (golden_q.size() == 0) begin
+          $display("Underflow during mixed pop at t=%0t", $time);
+          err_count++;
+          $fatal(1, "Underflow");
+        end
+        got = dout;
+        exp = golden_q.pop_front();
+        if (got !== exp) begin
+          $display("Data mismatch (mixed): exp=%0h got=%0h t=%0t", exp, got, $time);
+          err_count++;
+          $fatal(1, "Data mismatch");
+        end
+        pops++;
+        ops++;
+      end else begin
+        // Idle when neither legal push nor pop fits the bias
+        wr_en <= 0;
+        rd_en <= 0;
+        @(posedge clk);
+      end
+    end
+
+    // Phase D: Explicitly hit full and then drain to empty again
+    guard = 0;
+    while (!full && guard < 10000) begin
+      if (!full) begin
+        val = val + 1;
+        din <= val;
+        wr_en <= 1;
+        rd_en <= 0;
+        @(posedge clk);
+        wr_en <= 0;
+        golden_q.push_back(val);
+        pushes++;
+      end else begin
+        wr_en <= 0;
+        rd_en <= 0;
+        @(posedge clk);
+      end
+      guard++;
+    end
+    wr_en <= 0;
+    rd_en <= 0;
+
+    guard = 0;
+    while (!empty && guard < 20000) begin
+      if (!empty) begin
+        wr_en <= 0;
+        rd_en <= 1;
+        @(posedge clk);
+        rd_en <= 0;
+        @(posedge clk);
+        if (golden_q.size() == 0) begin
+          $display("Underflow during final drain at t=%0t", $time);
+          err_count++;
+          $fatal(1, "Underflow");
+        end
+        got = dout;
+        exp = golden_q.pop_front();
+        if (got !== exp) begin
+          $display("Data mismatch (final drain): exp=%0h got=%0h t=%0t", exp, got, $time);
+          err_count++;
+          $fatal(1, "Data mismatch");
+        end
+        pops++;
+      end else begin
+        wr_en <= 0;
+        rd_en <= 0;
+        @(posedge clk);
+      end
+      guard++;
+    end
+
+    wr_en <= 0;
+    rd_en <= 0;
+    repeat (5) @(posedge clk);
+    $finish;
   end
   // @LLM_EDIT END MAIN_SCENARIO
 
   // ------------------------------
-  // Emit machine-readable result
+  // EMIT_RESULTS
   // ------------------------------
   // @LLM_EDIT BEGIN EMIT_RESULTS
 initial begin
-  integer local_timeout_cyc;
-  local_timeout_cyc = (NUM_TXNS > 0) ? (NUM_TXNS * 20) : 1000;
-  fork
-    begin
-      repeat (local_timeout_cyc) @(posedge clk);
-      $display("RESULT: FAIL");
-      $fatal(1);
-    end
-    begin
-      wait (done);
-      if (err_count == 0 && txn_count >= NUM_TXNS) begin
-        $display("RESULT: PASS");
-        $finish;
+    integer idle_cnt;
+    idle_cnt = 0;
+    // Wait for any activity before evaluating results
+    wait (pushes > 0 || pops > 0);
+    idle_cnt = 0;
+    forever begin
+      @(posedge clk);
+      if (wr_en == 0 && rd_en == 0) begin
+        idle_cnt = idle_cnt + 1;
+        if (idle_cnt >= 5) begin
+          if (err_count == 0 && pops > 0 && pushes > 0) begin
+            $display("RESULT: PASS");            $finish;
+          end else begin
+            $display("RESULT: FAIL");
+            $fatal(1);
+          end
+          ;
+        end
       end else begin
-        $display("RESULT: FAIL");
-        $fatal(1);
+        idle_cnt = 0;
       end
     end
-  join_any
-  disable fork;
-end
+  end
   // @LLM_EDIT END EMIT_RESULTS
 
   // ------------------------------

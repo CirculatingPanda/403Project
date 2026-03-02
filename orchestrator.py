@@ -22,6 +22,7 @@ GEN_SPECS = GEN_DIR / "specs"
 VER_SPECS = VER_DIR / "specs"
 DUT_DIR = VER_DIR / "DUT"
 GEN_OUT = GEN_DIR / "output"
+VER_LOGS = VER_DIR / "logs"
 
 
 @dataclass
@@ -262,8 +263,23 @@ def _clear_specs_and_dut() -> int:
                     p.rmdir()
                 except Exception:
                     pass
+    log_count = 0
+    if VER_LOGS.exists():
+        for p in VER_LOGS.rglob("*"):
+            if p.is_file():
+                try:
+                    p.unlink()
+                    log_count += 1
+                except Exception:
+                    pass
+        for p in sorted(VER_LOGS.rglob("*"), reverse=True):
+            if p.is_dir():
+                try:
+                    p.rmdir()
+                except Exception:
+                    pass
     print(f"[orchestrator] Cleared specs: gen={gen_spec_count}, ver={ver_spec_count}; "
-          f"DUT files={dut_count}; gen output files={out_count}.")
+          f"DUT files={dut_count}; gen output files={out_count}; logs={log_count}.")
     return 0
 
 
@@ -299,7 +315,7 @@ def main() -> int:
 
     args = ap.parse_args()
     subsystems = _load_config(args.config or None)
-    if args.cmd not in subsystems and args.cmd not in ("status", "verify", "generate"):
+    if args.cmd not in subsystems and args.cmd not in ("status", "verify", "generate", "chat", "clear"):
         raise SystemExit(f"Unknown subsystem: {args.cmd}")
 
     return args.func(subsystems, args)

@@ -3,7 +3,8 @@ Param(
   [int]$MaxIters = [int](@($env:TB_CHECKER_MAX_ITERS, 10) | Where-Object { $_ -ne $null } | Select-Object -First 1),
   [string]$LogDir = "logs",
   [switch]$Verbose,
-  [switch]$CleanOnly
+  [switch]$CleanOnly,
+  [int]$MaxRetries = 2
 )
 
 # ------------------------------
@@ -17,6 +18,16 @@ Write-Host ""
 
 if (-not $env:LLM_PROVIDER) {
   $env:LLM_PROVIDER = "tamu"
+}
+$tamuModel = $env:TAMUS_AI_MODEL
+if ($tamuModel -and -not $env:LLM_MODEL) {
+  $env:LLM_MODEL = $tamuModel
+}
+if ($tamuModel -and -not $env:TB_ENGINEER_MODEL) {
+  $env:TB_ENGINEER_MODEL = $tamuModel
+}
+if ($tamuModel -and -not $env:TB_CHECKER_MODEL) {
+  $env:TB_CHECKER_MODEL = $tamuModel
 }
 $env:PYTHONUNBUFFERED = "1"
 
@@ -44,6 +55,31 @@ function Fail-And-Exit {
   exit $Code
 }
 
+function Test-RetryableFailure {
+  param(
+    [string[]]$LogPaths
+  )
+  $patterns = @(
+    "RemoteException",
+    "Read timed out",
+    "timed out",
+    "timeout",
+    "HTTP 524",
+    "Checker JSON parse failed"
+  )
+  foreach ($p in $LogPaths) {
+    if (-not (Test-Path $p)) { continue }
+    try {
+      $txt = Get-Content -Raw -Path $p
+      foreach ($pat in $patterns) {
+        if ($txt -match $pat) { return $true }
+      }
+    } catch {
+      continue
+    }
+  }
+  return $false
+}
 function Clear-RunArtifacts {
   param(
     [string]$LogDir = "logs"
@@ -83,9 +119,19 @@ if ($CleanOnly) {
 }
 
 # ------------------------------
-# 1/3 Generate TB
+# Retry wrapper
 # ------------------------------
-Write-Host "[1/3] Generate TB from $Spec"
+for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+  if ($attempt -gt 1) {
+    Write-Host ""
+    Write-Host "=== RETRY $attempt/$MaxRetries ===" -ForegroundColor Yellow
+    Clear-RunArtifacts -LogDir $LogDir
+  }
+
+  # ------------------------------
+  # 1/3 Generate TB
+  # ------------------------------
+  Write-Host "[1/3] Generate TB from $Spec"
 
 # Build args for generate_tb.py
 $genArgs = @(
@@ -106,6 +152,11 @@ $genOut = python runner\generate_tb.py @genArgs 2>&1 | Tee-Object -FilePath $gen
 $genExit = $LASTEXITCODE
 
 if ($genExit -ne 0) {
+  $retryable = Test-RetryableFailure -LogPaths @($genLog)
+  if ($retryable -and $attempt -lt $MaxRetries) {
+    Write-Host "[1/3] Generate TB: RETRYING due to transient error" -ForegroundColor Yellow
+    continue
+  }
   Fail-And-Exit "Generate TB" $genExit $genLog
 }
 
@@ -136,6 +187,11 @@ if ($compExit -ne 0) {
   $fixExit = $LASTEXITCODE
 
   if ($fixExit -ne 0) {
+    $retryable = Test-RetryableFailure -LogPaths @($fixLog, $compLog)
+    if ($retryable -and $attempt -lt $MaxRetries) {
+      Write-Host "[2/3] Compile: RETRYING due to transient error" -ForegroundColor Yellow
+      continue
+    }
     Fail-And-Exit "Compile (auto-fix failed)" $compExit $fixLog
   }
 
@@ -143,6 +199,11 @@ if ($compExit -ne 0) {
   $compOut = & iverilog -g2012 -f $fl -o build\sim 2>&1 | Tee-Object -FilePath $compLog
   $compExit = $LASTEXITCODE
   if ($compExit -ne 0) {
+    $retryable = Test-RetryableFailure -LogPaths @($compLog)
+    if ($retryable -and $attempt -lt $MaxRetries) {
+      Write-Host "[2/3] Compile: RETRYING due to transient error" -ForegroundColor Yellow
+      continue
+    }
     Fail-And-Exit "Compile (after auto-fix)" $compExit $compLog
   }
 }
@@ -173,6 +234,11 @@ if ($simExit -ne 0) {
   $simFixOut = python runner\sim_fix.py --tb build\tb_gen.sv --filelist $fl --spec $Spec --failed-sim-log $simLog --max-iters $MaxIters 2>&1 | Tee-Object -FilePath $simFixLog
   $simFixExit = $LASTEXITCODE
   if ($simFixExit -ne 0) {
+    $retryable = Test-RetryableFailure -LogPaths @($simFixLog, $simLog)
+    if ($retryable -and $attempt -lt $MaxRetries) {
+      Write-Host "[3/3] Simulation: RETRYING due to transient error" -ForegroundColor Yellow
+      continue
+    }
     Fail-And-Exit "Simulation (auto-fix failed)" $simExit $simFixLog
   }
   $simExit = 0
@@ -211,3 +277,4 @@ Write-Host "  Sim-fix:       $simFixLog"
 Write-Host "================"
 
 exit $simExit
+}
