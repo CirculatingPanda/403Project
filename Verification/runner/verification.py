@@ -328,6 +328,7 @@ class GuardedEditEngine:
             "- Hold addr stable from request assertion through read-data capture; deassert req/we between transactions.\n"
             "- Use integers for timing cycles already computed for you in 'timing_cycles'.\n"
             "- Do not introduce file I/O, DPI, or non-determinism.\n"
+            "- Do not use SystemVerilog queues or dynamic arrays; use fixed-size arrays/ring buffers.\n"
             "- Only produce edits for the provided region names. Do NOT include any other region names.\n"
             "- Declarations inside procedural blocks must appear before any executable statements (Icarus quirk).\n"
             "- Do not use 'final' blocks; use an 'initial' block with a wait-condition when needed (Icarus quirk).\n"
@@ -361,6 +362,7 @@ class GuardedEditEngine:
                 "Use $fatal on mismatches; do not print RESULT here unless the region is specifically for results.",
                 "In procedural blocks, declare locals at the top before any statements.",
                 "Avoid 'final'; use an 'initial' with a wait-condition.",
+                "Avoid SV queues/dynamic arrays; use fixed arrays or ring buffers.",
                 "For reads, wait for rvalid (if present) and then sample rdata on next posedge; avoid same-cycle sampling.",
                 "Keep addr stable during request and until read data capture; deassert req/we between transactions.",
                 "After reset deassertion, wait 1-2 cycles before starting stimulus."

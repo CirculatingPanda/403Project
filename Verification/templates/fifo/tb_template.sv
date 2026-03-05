@@ -14,7 +14,7 @@ module tb;
   localparam real CLK_MHZ  = {{CLK_MHZ}};        // e.g., 100
   localparam real CLK_NS   = (1000.0/CLK_MHZ);
 
-  int NUM_TXNS = {{NUM_TRANSACTIONS}};          // total push+pop ops target
+  localparam int NUM_TXNS = {{NUM_TRANSACTIONS}}; // total push+pop ops target
 
   // ------------------------------
   // Timing in cycles (LLM fills if you model setup/hold/gaps)
@@ -94,15 +94,22 @@ module tb;
   // @LLM_EDIT END TASK_POP
 
   // ------------------------------
-  // Scoreboard
+  // Scoreboard (avoid SV queues; use fixed arrays / ring buffer)
   // ------------------------------
   int                err_count = 0;
-  int                pushes = 0, pops = 0;
+  int                pushes = 0;
+  int                pops = 0;
+  int                ops = 0;
+  logic              done = 1'b0;
   logic [DATA_W-1:0] got_q, exp_q;
+  logic [DATA_W-1:0] model_mem [0:DEPTH-1];
+  int                model_wptr = 0;
+  int                model_rptr = 0;
+  int                model_count = 0;
 
   task automatic check_eq(input [DATA_W-1:0] exp, input [DATA_W-1:0] got);
     if (exp !== got) begin
-      $error("[TB][MISMATCH] exp=0x%0h got=0x%0h", exp, got);
+      $display("[TB][MISMATCH] exp=0x%0h got=0x%0h", exp, got);
       err_count++;
     end
   endtask
@@ -118,11 +125,12 @@ module tb;
   // @LLM_EDIT BEGIN MAIN_SCENARIO
   // initial begin
   //   wr_en = 0; rd_en = 0; din = '0;
+  //   done = 1'b0;
+  //   ops = 0;
   //   repeat (5) @(posedge clk);
   //   rstn <= 1;
   //
   //   // Example skeleton (LLM may replace/refine inside this region):
-  //   automatic int ops = 0;
   //   while (ops < NUM_TXNS) begin
   //     // Randomly choose to push or pop; bias away from illegal ops.
   //     if (!full && ($urandom%2==0)) begin
@@ -131,12 +139,12 @@ module tb;
   //     end
   //     else if (!empty) begin
   //       do_pop(got_q);
-  //       // Set exp_q from golden model (implicitly advanced by same pins) or mirror queue
-  //       // check_eq(exp_q, got_q);
+  //       // Use model_mem/model_wptr/model_rptr for expected data.
   //       pops++;
   //     end
   //     ops++;
   //   end
+  //   done = 1'b1;
   // end
   // @LLM_EDIT END MAIN_SCENARIO
 
@@ -144,12 +152,14 @@ module tb;
   // EMIT_RESULTS
   // ------------------------------
   // @LLM_EDIT BEGIN EMIT_RESULTS
-  // final begin
+  // initial begin
+  //   wait (done);
   //   if (err_count == 0 && pops > 0 && pushes > 0) $display("RESULT: PASS");
   //   else begin
   //     $display("RESULT: FAIL");
   //     $fatal(1);
   //   end
+  //   $finish;
   // end
   // @LLM_EDIT END EMIT_RESULTS
 

@@ -408,6 +408,7 @@ def run_checker_loop(initial_tb: str,
     soft_stop_count = 0
 
     for i in range(1, max_iters+1):
+        tb = icarus_fixups(tb)
         print(f"[checker] iter {i}/{max_iters}: starting review", flush=True)
         tb_hash = hash(tb)
         seen_counts[tb_hash] = seen_counts.get(tb_hash, 0) + 1
@@ -815,11 +816,17 @@ def _fix_module_endmodule_mismatch(text: str) -> str:
     endmod_count = len(re.findall(r"\bendmodule\b", text))
     if mod_count == endmod_count:
         return text
-    if endmod_count == mod_count + 1:
-        # Drop the last 'endmodule'
-        return re.sub(r"(endmodule\b)(?!.*endmodule\b)", "", text, flags=re.S)
+    # Drop extra endmodule(s) from the end until counts match.
+    while endmod_count > mod_count:
+        new_text = re.sub(r"(endmodule\b)(?!.*endmodule\b)", "", text, flags=re.S)
+        if new_text == text:
+            break
+        text = new_text
+        endmod_count = len(re.findall(r"\bendmodule\b", text))
+    # If missing, append exactly one.
+    mod_count = len(re.findall(r"\bmodule\b", text))
+    endmod_count = len(re.findall(r"\bendmodule\b", text))
     if mod_count == endmod_count + 1:
-        # Append a missing endmodule at EOF
         return text.rstrip() + "\nendmodule\n"
     return text
 
