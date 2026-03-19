@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -18,6 +19,9 @@ ROOT = Path(__file__).resolve().parent
 GEN_DIR = ROOT / "Generationv2"
 VER_DIR = ROOT / "Verification"
 FE_DIR = ROOT / "Front End"
+SYN_DIR = ROOT / "Capstone-LLM-Chip-Design-1" / "synthesis_pnr" / "capstone"
+SYN_SCRIPT_DIR = SYN_DIR / "scripts"
+SYN_INPUT_DIR = SYN_DIR / "rtl" / "orchestrator_sync"
 GEN_SPECS = GEN_DIR / "specs"
 VER_SPECS = VER_DIR / "specs"
 DUT_DIR = VER_DIR / "DUT"
@@ -33,10 +37,31 @@ class Subsystem:
     env: Optional[Dict[str, str]] = None
 
 
-def _which_shell() -> str:
-    if shutil.which("pwsh"):
-        return "pwsh"
-    return "powershell"
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _python_cmd() -> str:
+    if sys.executable:
+        return sys.executable
+    if not _is_windows() and shutil.which("python3"):
+        return "python3"
+    return "python"
+
+
+def _verification_cmd() -> List[str]:
+    if _is_windows():
+        if shutil.which("pwsh"):
+            return ["pwsh", "-File", str(VER_DIR / "run.ps1")]
+        return ["powershell", "-File", str(VER_DIR / "run.ps1")]
+    shell = shutil.which("bash") or shutil.which("sh")
+    if not shell:
+        raise SystemExit("Verification requires bash or sh on non-Windows platforms.")
+    return [shell, str(VER_DIR / "run.sh")]
+
+
+def _synthesis_cmd() -> List[str]:
+    return [_python_cmd(), str(SYN_SCRIPT_DIR / "automation_final.py")]
 
 
 def _load_config(path: Optional[str]) -> Dict[str, Subsystem]:
@@ -45,13 +70,18 @@ def _load_config(path: Optional[str]) -> Dict[str, Subsystem]:
     # Default built-ins
     subsystems["verification"] = Subsystem(
         name="verification",
-        cmd=[_which_shell(), "-File", str(VER_DIR / "run.ps1")],
+        cmd=_verification_cmd(),
         cwd=VER_DIR,
     )
     subsystems["generation"] = Subsystem(
         name="generation",
-        cmd=["python", str(GEN_DIR / "mc_generator_v2.py")],
+        cmd=[_python_cmd(), str(GEN_DIR / "mc_generator_v2.py")],
         cwd=GEN_DIR,
+    )
+    subsystems["synthesis"] = Subsystem(
+        name="synthesis",
+        cmd=_synthesis_cmd(),
+        cwd=SYN_SCRIPT_DIR,
     )
 
     if not path:
@@ -100,10 +130,12 @@ def _status(subsystems: Dict[str, Subsystem]) -> int:
     print(f"  ROOT: {ROOT}")
     print(f"  Generation: {GEN_DIR} ({'ok' if GEN_DIR.exists() else 'missing'})")
     print(f"  Verification: {VER_DIR} ({'ok' if VER_DIR.exists() else 'missing'})")
+    print(f"  Synthesis: {SYN_DIR} ({'ok' if SYN_DIR.exists() else 'missing'})")
     print(f"  Front End: {FE_DIR} ({'ok' if FE_DIR.exists() else 'missing'})")
     print(f"  Gen specs: {GEN_SPECS}")
     print(f"  Ver specs: {VER_SPECS}")
     print(f"  DUT dir: {DUT_DIR}")
+    print(f"  Synth RTL dir: {SYN_INPUT_DIR}")
     return 0
 
 
@@ -144,8 +176,35 @@ def _generation(subsystems: Dict[str, Subsystem], args: argparse.Namespace) -> i
         extra += args.passthrough
     rc = _run_cmd(ss, extra, args.dry_run)
     if rc == 0 and not args.dry_run:
-        _sync_gen_output_to_dut()
+        _sync_pipeline_outputs()
     return rc
+
+
+def _synthesis(subsystems: Dict[str, Subsystem], args: argparse.Namespace) -> int:
+    ss = subsystems["synthesis"]
+    if not args.rtl_dir:
+        if not args.no_sync and not args.dry_run:
+            _sync_verification_dut_to_synthesis()
+        rtl_dir = SYN_INPUT_DIR
+    else:
+        rtl_dir = Path(args.rtl_dir).resolve()
+    if not rtl_dir.exists() and not args.dry_run:
+        raise SystemExit(f"Synthesis RTL directory not found: {rtl_dir}")
+
+    extra: List[str] = ["--design", args.design, "--rtl-dir", str(rtl_dir), "--design_type", args.design_type]
+    if args.top:
+        extra += ["--top", args.top]
+    if args.log:
+        extra += ["--log", args.log]
+    if args.timeout is not None:
+        extra += ["--timeout", str(args.timeout)]
+    if args.setup_script:
+        extra += ["--setup-script", args.setup_script]
+    if args.stream:
+        extra += ["--stream"]
+    if args.passthrough:
+        extra += args.passthrough
+    return _run_cmd(ss, extra, args.dry_run)
 
 
 def _latest_json(front_end_dir: Path) -> Optional[Path]:
@@ -181,7 +240,7 @@ def _chat(subsystems: Dict[str, Subsystem], args: argparse.Namespace) -> int:
     chat_py = FE_DIR / "chat.py"
     if not chat_py.exists():
         raise SystemExit(f"Front End chat.py not found: {chat_py}")
-    cmd = ["python", str(chat_py)]
+    cmd = [_python_cmd(), str(chat_py)]
     if args.dry_run:
         print("[orchestrator] dry-run:", " ".join(cmd))
         return 0
@@ -219,11 +278,42 @@ def _sync_gen_output_to_dut() -> None:
     print(f"[orchestrator] Copied {copied} RTL files to DUT.")
 
 
+def _sync_dir_files(src_dir: Path, dst_dir: Path, suffixes: tuple[str, ...], label: str) -> int:
+    if not src_dir.exists():
+        print(f"[orchestrator] No {label} source directory found: {src_dir}")
+        return 0
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for p in src_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in suffixes:
+            continue
+        dst = dst_dir / p.name
+        shutil.copy2(p, dst)
+        copied += 1
+    print(f"[orchestrator] Copied {copied} {label} files to {dst_dir}.")
+    return copied
+
+
+def _sync_verification_dut_to_synthesis() -> int:
+    copied = _sync_dir_files(DUT_DIR, SYN_INPUT_DIR, (".sv", ".v", ".svh", ".sdc"), "synthesis input")
+    if copied == 0:
+        copied = _sync_dir_files(GEN_OUT, SYN_INPUT_DIR, (".sv", ".v", ".svh", ".sdc"), "synthesis input")
+    return copied
+
+
+def _sync_pipeline_outputs() -> None:
+    _sync_gen_output_to_dut()
+    _sync_verification_dut_to_synthesis()
+
+
 def _clear_specs_and_dut() -> int:
     gen_spec_count = 0
     ver_spec_count = 0
     dut_count = 0
     out_count = 0
+    syn_input_count = 0
     if GEN_SPECS.exists():
         for p in GEN_SPECS.rglob("*"):
             if p.is_file():
@@ -263,6 +353,20 @@ def _clear_specs_and_dut() -> int:
                     p.rmdir()
                 except Exception:
                     pass
+    if SYN_INPUT_DIR.exists():
+        for p in SYN_INPUT_DIR.rglob("*"):
+            if p.is_file():
+                try:
+                    p.unlink()
+                    syn_input_count += 1
+                except Exception:
+                    pass
+        for p in sorted(SYN_INPUT_DIR.rglob("*"), reverse=True):
+            if p.is_dir():
+                try:
+                    p.rmdir()
+                except Exception:
+                    pass
     log_count = 0
     if VER_LOGS.exists():
         for p in VER_LOGS.rglob("*"):
@@ -279,7 +383,7 @@ def _clear_specs_and_dut() -> int:
                 except Exception:
                     pass
     print(f"[orchestrator] Cleared specs: gen={gen_spec_count}, ver={ver_spec_count}; "
-          f"DUT files={dut_count}; gen output files={out_count}; logs={log_count}.")
+          f"DUT files={dut_count}; gen output files={out_count}; synth input files={syn_input_count}; logs={log_count}.")
     return 0
 
 
@@ -298,7 +402,7 @@ def main() -> int:
     sub_ver.add_argument("--log-dir", default="", help="Override log directory")
     sub_ver.add_argument("--verbose", action="store_true", help="Verbose verification output")
     sub_ver.add_argument("--clean-only", action="store_true", help="Only clean artifacts and exit")
-    sub_ver.add_argument("passthrough", nargs=argparse.REMAINDER, help="Extra args for run.ps1")
+    sub_ver.add_argument("passthrough", nargs=argparse.REMAINDER, help="Extra args for verification wrapper")
     sub_ver.set_defaults(func=_verify)
 
     sub_gen = sub.add_parser("generate", help="Run generation flow")
@@ -306,6 +410,19 @@ def main() -> int:
     sub_gen.add_argument("--output", default="", help="Output directory for generator")
     sub_gen.add_argument("passthrough", nargs=argparse.REMAINDER, help="Args forwarded to generator")
     sub_gen.set_defaults(func=_generation)
+
+    sub_syn = sub.add_parser("synthesize", help="Run Cadence synthesis/PnR flow")
+    sub_syn.add_argument("--design", required=True, help="Design name for generated Cadence outputs")
+    sub_syn.add_argument("--design-type", choices=("comb", "seq"), default="seq", help="Design type for constraints/template selection")
+    sub_syn.add_argument("--top", default="", help="Optional top module override")
+    sub_syn.add_argument("--rtl-dir", default="", help=f"RTL directory to synthesize (defaults to {SYN_INPUT_DIR})")
+    sub_syn.add_argument("--no-sync", action="store_true", help="Do not refresh staged synthesis RTL from Verification/DUT")
+    sub_syn.add_argument("--log", default="", help="Optional Genus log path override")
+    sub_syn.add_argument("--timeout", type=int, default=0, help="Global timeout in seconds")
+    sub_syn.add_argument("--setup-script", default="", help="Optional Cadence setup script override")
+    sub_syn.add_argument("--stream", action="store_true", help="Stream Cadence tool output")
+    sub_syn.add_argument("passthrough", nargs=argparse.REMAINDER, help="Args forwarded to automation_final.py")
+    sub_syn.set_defaults(func=_synthesis)
 
     sub_chat = sub.add_parser("chat", help="Launch front-end chatbot and sync spec JSON")
     sub_chat.set_defaults(func=_chat)
@@ -315,7 +432,7 @@ def main() -> int:
 
     args = ap.parse_args()
     subsystems = _load_config(args.config or None)
-    if args.cmd not in subsystems and args.cmd not in ("status", "verify", "generate", "chat", "clear"):
+    if args.cmd not in subsystems and args.cmd not in ("status", "verify", "generate", "synthesize", "chat", "clear"):
         raise SystemExit(f"Unknown subsystem: {args.cmd}")
 
     return args.func(subsystems, args)

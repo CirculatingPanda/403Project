@@ -6,7 +6,9 @@ Requires PySide6 (already used by Front End).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -24,15 +26,33 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QGroupBox,
     QCheckBox,
-)
+    QInputDialog,
+    )
 
 ROOT = Path(__file__).resolve().parent
-PY = str(Path(__file__).resolve().parent / ".venv" / "Scripts" / "python.exe")
-if not Path(PY).exists():
-    PY = "python"
+
+
+def _python_cmd() -> str:
+    candidates = []
+    if os.name == "nt":
+        candidates.append(ROOT / ".venv" / "Scripts" / "python.exe")
+    else:
+        candidates.append(ROOT / ".venv" / "bin" / "python")
+    if sys.executable:
+        candidates.append(Path(sys.executable))
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    return "python3" if os.name != "nt" else "python"
+
+
+PY = _python_cmd()
 FE_DIR = ROOT / "Front End"
 GEN_DIR = ROOT / "Generationv2"
 VER_DIR = ROOT / "Verification"
+SYN_DIR = ROOT / "Capstone-LLM-Chip-Design-1" / "synthesis_pnr" / "capstone"
+SYN_SCRIPT_DIR = SYN_DIR / "scripts"
+SYN_INPUT_DIR = SYN_DIR / "rtl" / "orchestrator_sync"
 
 
 @dataclass
@@ -42,16 +62,23 @@ class Phase:
     cwd: Path
 
 
-def _which_shell() -> str:
-    if (Path(PY).parent / "pwsh.exe").exists():
-        return "pwsh"
-    return "powershell"
+def _verification_cmd() -> List[str]:
+    if os.name == "nt":
+        if (Path(PY).parent / "pwsh.exe").exists():
+            return ["pwsh", "-File", str(VER_DIR / "run.ps1")]
+        return ["powershell", "-File", str(VER_DIR / "run.ps1")]
+    return ["bash", str(VER_DIR / "run.sh")]
+
+
+def _synthesis_cmd() -> List[str]:
+    return [PY, str(SYN_SCRIPT_DIR / "automation_final.py")]
 
 
 PHASES = [
     Phase("Front End Chat", [PY, str(FE_DIR / "chat.py")], FE_DIR),
     Phase("Generation", [PY, str(GEN_DIR / "mc_generator_v2.py")], GEN_DIR),
-    Phase("Verification", [_which_shell(), "-File", str(VER_DIR / "run.ps1")], VER_DIR),
+    Phase("Verification", _verification_cmd(), VER_DIR),
+    Phase("Synthesis", _synthesis_cmd(), SYN_SCRIPT_DIR),
 ]
 
 
@@ -103,16 +130,42 @@ def _sync_gen_output_to_dut(log_fn) -> None:
     log_fn(f"[sync] copied {copied} RTL files to DUT")
 
 
+def _sync_dir_files(src_dir: Path, dst_dir: Path, suffixes, log_fn, label: str) -> int:
+    if not src_dir.exists():
+        log_fn(f"[sync] no {label} source directory found: {src_dir}")
+        return 0
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    for p in src_dir.rglob("*"):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in suffixes:
+            continue
+        dst = dst_dir / p.name
+        dst.write_bytes(p.read_bytes())
+        copied += 1
+    log_fn(f"[sync] copied {copied} {label} files to {dst_dir}")
+    return copied
+
+
+def _sync_verification_dut_to_synthesis(log_fn) -> None:
+    copied = _sync_dir_files(DUT_DIR := VER_DIR / "DUT", SYN_INPUT_DIR, (".sv", ".v", ".svh", ".sdc"), log_fn, "synthesis input")
+    if copied == 0:
+        _sync_dir_files(GEN_DIR / "output", SYN_INPUT_DIR, (".sv", ".v", ".svh", ".sdc"), log_fn, "synthesis input")
+
+
 def _clear_specs_and_dut(log_fn) -> None:
     gen_specs = GEN_DIR / "specs"
     ver_specs = VER_DIR / "specs"
     dut_dir = VER_DIR / "DUT"
     gen_out = GEN_DIR / "output"
     ver_logs = VER_DIR / "logs"
+    syn_input = SYN_INPUT_DIR
     gen_spec_count = 0
     ver_spec_count = 0
     dut_count = 0
     out_count = 0
+    syn_count = 0
     if gen_specs.exists():
         for p in gen_specs.rglob("*"):
             if p.is_file():
@@ -151,6 +204,20 @@ def _clear_specs_and_dut(log_fn) -> None:
                     p.rmdir()
                 except Exception:
                     pass
+    if syn_input.exists():
+        for p in syn_input.rglob("*"):
+            if p.is_file():
+                try:
+                    p.unlink()
+                    syn_count += 1
+                except Exception:
+                    pass
+        for p in sorted(syn_input.rglob("*"), reverse=True):
+            if p.is_dir():
+                try:
+                    p.rmdir()
+                except Exception:
+                    pass
     log_count = 0
     if ver_logs.exists():
         for p in ver_logs.rglob("*"):
@@ -167,7 +234,7 @@ def _clear_specs_and_dut(log_fn) -> None:
                 except Exception:
                     pass
     log_fn(f"[clear] specs: gen={gen_spec_count}, ver={ver_spec_count}; "
-           f"DUT files={dut_count}; gen output files={out_count}; logs={log_count}")
+           f"DUT files={dut_count}; gen output files={out_count}; synth input files={syn_count}; logs={log_count}")
 
 
 class RunnerThread(QThread):
@@ -205,6 +272,7 @@ class OrchestratorGUI(QWidget):
         self.btn_chat = QPushButton("Run Front End Chat")
         self.btn_gen = QPushButton("Run Generation")
         self.btn_ver = QPushButton("Run Verification")
+        self.btn_syn = QPushButton("Run Synthesis")
 
         self.chk_skip_gen = QCheckBox("Skip generation (use provided RTL)")
         self.btn_upload_rtl = QPushButton("Upload existing RTL (future)")
@@ -215,6 +283,7 @@ class OrchestratorGUI(QWidget):
         self.btn_chat.clicked.connect(lambda: self.run_phase(0))
         self.btn_gen.clicked.connect(lambda: self.run_phase(1))
         self.btn_ver.clicked.connect(lambda: self.run_phase(2))
+        self.btn_syn.clicked.connect(lambda: self.run_phase(3))
         self.btn_run_all.clicked.connect(self.run_all)
         self.btn_upload_rtl.clicked.connect(self.upload_rtl)
 
@@ -227,6 +296,7 @@ class OrchestratorGUI(QWidget):
         box_layout.addWidget(self.btn_chat)
         box_layout.addWidget(self.btn_gen)
         box_layout.addWidget(self.btn_ver)
+        box_layout.addWidget(self.btn_syn)
         box_layout.addWidget(self.btn_run_all)
         box.setLayout(box_layout)
         layout.addWidget(box)
@@ -247,6 +317,9 @@ class OrchestratorGUI(QWidget):
         self._phase_index = 0
         self._pipeline = []
         self._latest_spec: Optional[Path] = None
+        self._synth_design: str = ""
+        self._synth_design_type: str = "seq"
+        self._synth_top: str = ""
 
     def log_line(self, txt: str) -> None:
         self.log.append(txt)
@@ -274,6 +347,19 @@ class OrchestratorGUI(QWidget):
             if self._latest_spec:
                 ver_spec = VER_DIR / "specs" / self._latest_spec.name
                 cmd += ["-Spec", str(ver_spec)]
+        if phase.name == "Synthesis":
+            if not self._configure_synthesis():
+                self.log_line("[phase] Synthesis canceled")
+                return
+            _sync_verification_dut_to_synthesis(self.log_line)
+            cmd += [
+                "--design", self._synth_design,
+                "--rtl-dir", str(SYN_INPUT_DIR),
+                "--design_type", self._synth_design_type,
+                "--stream",
+            ]
+            if self._synth_top:
+                cmd += ["--top", self._synth_top]
         self.log_line(f"[phase] {phase.name} starting")
         self._current_thread = RunnerThread(cmd, phase.cwd)
         self._current_thread.log.connect(self.log_line)
@@ -283,9 +369,9 @@ class OrchestratorGUI(QWidget):
     def run_all(self) -> None:
         if self.chk_clear.isChecked():
             _clear_specs_and_dut(self.log_line)
-        self._pipeline = [0, 1, 2]
+        self._pipeline = [0, 1, 2, 3]
         if self.chk_skip_gen.isChecked():
-            self._pipeline = [0, 2]
+            self._pipeline = [0, 2, 3]
         self._phase_index = 0
         self.set_progress(0, len(self._pipeline))
         self.run_phase(self._pipeline[self._phase_index])
@@ -300,6 +386,9 @@ class OrchestratorGUI(QWidget):
                 self.log_line("[spec] copied to Generationv2/specs and Verification/specs")
         if ok and PHASES[phase_idx].name == "Generation":
             _sync_gen_output_to_dut(self.log_line)
+            _sync_verification_dut_to_synthesis(self.log_line)
+        if ok and PHASES[phase_idx].name == "Verification":
+            _sync_verification_dut_to_synthesis(self.log_line)
         if not self._pipeline:
             return
         self._phase_index += 1
@@ -318,6 +407,41 @@ class OrchestratorGUI(QWidget):
             return
         self.log_line(f"[rtl] selected {len(files)} files")
         # Placeholder: future copy/index step.
+
+    def _configure_synthesis(self) -> bool:
+        default_design = self._default_design_name()
+        design, ok = QInputDialog.getText(self, "Synthesis Design", "Design name:", text=default_design)
+        if not ok or not design.strip():
+            return False
+        design_type, ok = QInputDialog.getItem(
+            self,
+            "Synthesis Type",
+            "Design type:",
+            ["seq", "comb"],
+            editable=False,
+        )
+        if not ok or not design_type:
+            return False
+        top, ok = QInputDialog.getText(
+            self,
+            "Synthesis Top",
+            "Top module override (leave empty for auto-detect):",
+            text=self._synth_top,
+        )
+        if not ok:
+            return False
+        self._synth_design = design.strip()
+        self._synth_design_type = design_type
+        self._synth_top = top.strip()
+        return True
+
+    def _default_design_name(self) -> str:
+        if self._synth_design:
+            return self._synth_design
+        if self._latest_spec is not None:
+            stem = self._latest_spec.stem
+            return stem.replace(" ", "_")
+        return "generated_design"
 
 
 def main() -> int:
