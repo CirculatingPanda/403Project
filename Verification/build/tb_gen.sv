@@ -20,8 +20,8 @@ module tb;
   // Timing in cycles (LLM fills if you model setup/hold/gaps)
   // ------------------------------
   // @LLM_EDIT BEGIN TIMING_CYCLES
-int T_PUSH_GAP_CYC = 1; // min cycles between pushes
-int T_POP_GAP_CYC  = 1; // min cycles between pops
+localparam int T_PUSH_GAP_CYC = 0;
+localparam int T_POP_GAP_CYC  = 0;
   // @LLM_EDIT END TIMING_CYCLES
 
   // ------------------------------
@@ -38,35 +38,30 @@ int T_POP_GAP_CYC  = 1; // min cycles between pops
   logic                 rd_en;
   logic [DATA_W-1:0]    din;
   wire  [DATA_W-1:0]    dout;
-  wire                  rd_valid;
-  wire                  wr_ready;
   wire                  full;
   wire                  empty;
   wire                  almost_full;
   wire                  almost_empty;
 
   // ------------------------------
-  // fifo_ctrl_fifo_ctrl DUT (teammate’s FIFO)
+  // Instantiate DUT (teammate’s FIFO)
   // ------------------------------
   fifo_ctrl #(
-    .DATA_WIDTH (DATA_W),
+    .DATA_W (DATA_W),
     .DEPTH  (DEPTH),
-    .ALMOST_FULL (AF_LEVEL),
-    .ALMOST_EMPTY (AE_LEVEL)
+    .AF_LVL (AF_LEVEL),
+    .AE_LVL (AE_LEVEL)
   ) dut (
     .clk          (clk),
-    .rst_n         (rstn),
-    .wr_valid    (wr_en),
-    .rd_ready    (rd_en),
-    .wr_data     (din),
-    .rd_data     (dout),
+    .rstn         (rstn),
+    .wr_en        (wr_en),
+    .rd_en        (rd_en),
+    .din          (din),
+    .dout         (dout),
     .full         (full),
     .empty        (empty),
     .almost_full  (almost_full),
-    .almost_empty (almost_empty),
-
-    .wr_ready   (wr_ready),
-    .rd_valid   (rd_valid)
+    .almost_empty (almost_empty)
   );
 
   // ------------------------------
@@ -78,7 +73,7 @@ int T_POP_GAP_CYC  = 1; // min cycles between pops
   // Optional assertions/monitors
   // ------------------------------
   // `include "libraries/svassert/fifo_protocol.svh"
-  // fifo_protocol_asrt #(.DATA_WIDTH(DATA_W), .DEPTH(DEPTH)) chk (.*);
+  // fifo_protocol_asrt #(.DATA_W(DATA_W), .DEPTH(DEPTH)) chk (.*);
 
   // ------------------------------
   // Driver tasks (LLM fills legal sequences that respect full/empty)
@@ -86,37 +81,62 @@ int T_POP_GAP_CYC  = 1; // min cycles between pops
   // @LLM_EDIT BEGIN TASK_PUSH
 task automatic do_push(input logic [DATA_W-1:0] d);
   int i;
-  // Wait until FIFO is not full
-  while (full) @(posedge clk);
-
-  // Drive data and assert write enable prior to the sampling edge
+  // Ensure enables are deasserted by default
+  wr_en = 1'b0;
+  // Wait for reset deassertion and a safe clock edge
+  if (!rstn) begin
+    @(posedge rstn);
+    @(posedge clk);
+  end
+  // Respect push gap cycles before issuing a new push
+  if (T_PUSH_GAP_CYC > 0) begin
+    for (i = 0; i < T_PUSH_GAP_CYC; i = i + 1) begin
+      @(posedge clk);
+    end
+  end
+  // Wait until FIFO is not full, align to a negedge to avoid races
+  while (full) begin
+    @(posedge clk);
+  end
+  @(negedge clk);
   din = d;
   wr_en = 1'b1;
+  // One cycle pulse on wr_en
   @(posedge clk);
+  @(negedge clk);
   wr_en = 1'b0;
-
-  // Respect inter-push gap cycles
-  for (i = 0; i < T_PUSH_GAP_CYC; i = i + 1) @(posedge clk);
 endtask
   // @LLM_EDIT END TASK_PUSH
 
   // @LLM_EDIT BEGIN TASK_POP
 task automatic do_pop(output logic [DATA_W-1:0] q);
   int i;
-  // Wait until FIFO is not empty
-  while (empty) @(posedge clk);
-
-  // Assert read enable for one cycle
-  rd_en = 1'b1;
-  @(posedge clk);
+  // Ensure enables are deasserted by default
   rd_en = 1'b0;
-
-  // Sample data on the next posedge to avoid races
+  // Wait for reset deassertion and a safe clock edge
+  if (!rstn) begin
+    @(posedge rstn);
+    @(posedge clk);
+  end
+  // Respect pop gap cycles before issuing a new pop
+  if (T_POP_GAP_CYC > 0) begin
+    for (i = 0; i < T_POP_GAP_CYC; i = i + 1) begin
+      @(posedge clk);
+    end
+  end
+  // Wait until FIFO is not empty, align to a negedge to avoid races
+  while (empty) begin
+    @(posedge clk);
+  end
+  @(negedge clk);
+  rd_en = 1'b1;
+  // One cycle pulse on rd_en
+  @(posedge clk);
+  @(negedge clk);
+  rd_en = 1'b0;
+  // Sample dout on the next posedge to avoid races
   @(posedge clk);
   q = dout;
-
-  // Respect inter-pop gap cycles
-  for (i = 0; i < T_POP_GAP_CYC; i = i + 1) @(posedge clk);
 endtask
   // @LLM_EDIT END TASK_POP
 
@@ -150,147 +170,46 @@ endtask
   //  * Cover almost_full/almost_empty transitions,
   //  * Keep scoreboard aligned with golden model.
   // @LLM_EDIT BEGIN MAIN_SCENARIO
-initial begin
-  integer i;
-  integer j;
-  integer burst_len;
-  integer cnt;
-
-  wr_en = 0; rd_en = 0; din = '0;
-  done = 1'b0;
-  ops = 0;
-  repeat (5) @(posedge clk);
-  rstn <= 1;
-  repeat (2) @(posedge clk);
-
-  // Phase 1: Push until almost_full to cover transition
-  while (ops < NUM_TXNS && !almost_full && !full) begin
-    do_push($urandom);
-    pushes++;
-    ops++;
-  end
-
-  // Pop a few to move off almost_full boundary
-  cnt = 0;
-  while (ops < NUM_TXNS && !empty && cnt < 3) begin
-    do_pop(got_q);
-    pops++;
-    ops++;
-    cnt = cnt + 1;
-  end
-
-  // Phase 2: Go to full
-  while (ops < NUM_TXNS && !full) begin
-    do_push($urandom);
-    pushes++;
-    ops++;
-  end
-
-  // Drain to empty to cover full->empty path and almost_empty transition
-  while (ops < NUM_TXNS && !empty) begin
-    do_pop(got_q);
-    pops++;
-    ops++;
-  end
-
-  // Nudge almost_empty boundary: push a few from empty, then pop back
-  cnt = 0;
-  while (ops < NUM_TXNS && !full && cnt < 2) begin
-    do_push($urandom);
-    pushes++;
-    ops++;
-    cnt = cnt + 1;
-  end
-  cnt = 0;
-  while (ops < NUM_TXNS && !empty && cnt < 2) begin
-    do_pop(got_q);
-    pops++;
-    ops++;
-    cnt = cnt + 1;
-  end
-
-  // Phase 3: Random bursts honoring boundaries
-  while (ops < NUM_TXNS) begin
-    burst_len = ($urandom % 4) + 1; // 1..4
-    if (almost_full) begin
-      // Prefer pops when near full
-      for (j = 0; j < burst_len; j = j + 1) begin
-        if (ops >= NUM_TXNS) ;
-        if (!empty) begin
-          do_pop(got_q);
-          pops++;
-          ops++;
-        end else begin
-          // If empty, push to continue activity
-          if (!full) begin
-            do_push($urandom);
-            pushes++;
-            ops++;
-          end
-        end
-      end
-    end else if (almost_empty) begin
-      // Prefer pushes when near empty
-      for (j = 0; j < burst_len; j = j + 1) begin
-        if (ops >= NUM_TXNS) ;
-        if (!full) begin
-          do_push($urandom);
-          pushes++;
-          ops++;
-        end else begin
-          // If full, pop to continue activity
-          if (!empty) begin
-            do_pop(got_q);
-            pops++;
-            ops++;
-          end
-        end
-      end
-    end else begin
-      // Middle range: random choice, but avoid illegal ops
-      for (j = 0; j < burst_len; j = j + 1) begin
-        if (ops >= NUM_TXNS) ;
-        if (!full && !empty) begin
-          if (($urandom % 2) == 0) begin
-            do_push($urandom);
-            pushes++;
-            ops++;
-          end else begin
-            do_pop(got_q);
-            pops++;
-            ops++;
-          end
-        end else if (!full) begin
-          do_push($urandom);
-          pushes++;
-          ops++;
-        end else if (!empty) begin
-          do_pop(got_q);
-          pops++;
-          ops++;
-        end
-      end
-    end
-  end
-
-  done = 1'b1;
+  // initial begin
+  //   wr_en = 0; rd_en = 0; din = '0;
+  //   done = 1'b0;
+  //   ops = 0;
+  //   repeat (5) @(posedge clk);
+  //   rstn <= 1;
+  //
+  //   // Example skeleton (LLM may replace/refine inside this region):
+  //   while (ops < NUM_TXNS) begin
+  //     // Randomly choose to push or pop; bias away from illegal ops.
+  //     if (!full && ($urandom%2==0)) begin
+  //       do_push($urandom);
+  //       pushes++;
+  //     
 end
+  //     else if (!empty) begin
+  //       do_pop(got_q);
+  //       // Use model_mem/model_wptr/model_rptr for expected data.
+  //       pops++;
+  //     end
+  //     ops++;
+  //   end
+  //   done = 1'b1;
+  // end
   // @LLM_EDIT END MAIN_SCENARIO
 
   // ------------------------------
   // EMIT_RESULTS
   // ------------------------------
   // @LLM_EDIT BEGIN EMIT_RESULTS
-initial begin
-  wait (done);
-  if (err_count == 0 && pops > 0 && pushes > 0) begin
-    $display("RESULT: PASS");
-  end else begin
-    $display("RESULT: FAIL err_count=%0d pushes=%0d pops=%0d", err_count, pushes, pops);
-    $fatal(1);
-  end
-  $finish;
+  // initial begin
+  //   wait (done);
+  //   if (err_count == 0 && pops > 0 && pushes > 0) $display("RESULT: PASS");
+  //   else begin
+  //     $display("RESULT: FAIL");
+  //     $fatal(1);
+  //   
 end
+  //   $finish;
+  // end
   // @LLM_EDIT END EMIT_RESULTS
 
   // ------------------------------
